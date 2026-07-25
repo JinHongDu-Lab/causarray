@@ -22,6 +22,10 @@ extensions = [
     'sphinxcontrib.rsvgconverter',  # for SVG->PDF conversion in LaTeX output
 ]
 
+# Render $...$ / $$...$$ math in MyST-parsed Markdown (e.g. the R tutorial's
+# generated .md); notebook math already renders via nbsphinx + mathjax.
+myst_enable_extensions = ['dollarmath']
+
 nbsphinx_prolog = r"""
 {% set docname = 'docs/' + env.doc2path(env.docname, base=None) | string() %}
 .. raw:: html

@@ -355,6 +355,15 @@ better — and the Brier score. These scores are raw, so we pass
 `clip_bounds = NULL` and `clipped_fraction` comes back as `NA` instead
 of a misleading zero.
 
+Formally, ESS is Kish’s effective sample size of the inverse-probability
+weights,
+$$\mathrm{ESS} = \frac{\left(\sum_i w_i\right)^2}{\sum_i w_i^2}, \qquad
+w_i = \begin{cases} 1/\hat{\pi}_i & \text{treated cells} \\ 1/(1-\hat{\pi}_i) & \text{control cells,} \end{cases}$$
+
+where $\hat{\pi}_i = P(\text{treated} \mid X_i)$ is the propensity
+score. Equal weights give $\mathrm{ESS}=n$ (fraction 1); a few dominant
+weights push it toward 0.
+
 ``` r
 pi_oof <- causarray$estimate_propensity_scores(
   A, W_A, K = 5L, class_weight = "balanced", random_state = 0L
@@ -574,7 +583,10 @@ floor, so it does not fix the problem) and the effects are unchanged
 jumps to 0.306 — but it guts the control effective sample size, from
 39.5% to 3.9%, and destabilises the effects (correlation 0.840,
 discoveries 653); a high overlap ratio bought this way is misleading,
-because the estimate now rests on almost no effective controls. So the
+because the estimate now rests on almost no effective controls. That
+collapse is a weight problem: dropping U8 pushes a few control cells to
+propensity scores near 1, so their $1/(1-\hat{\pi}_i)$ control weights
+become extreme and a handful of controls dominate the arm. So the
 message is *not* “drop U9, keep U8”: dropping U9 fixes nothing and
 dropping U8 does real damage. Factor-dropping is the wrong tool here —
 keep all the factors and regularise instead.

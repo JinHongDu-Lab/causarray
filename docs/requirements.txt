@@ -4,7 +4,7 @@ numpydoc
 nbsphinx
 sphinxcontrib-bibtex
 sphinxcontrib-svg2pdfconverter
-myst-parser
+myst-parser==4.0.1  # dollarmath extension for $...$ math in the R tutorial .md
 
 h5py
 joblib

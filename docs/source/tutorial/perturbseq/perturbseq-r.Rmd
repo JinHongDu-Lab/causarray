@@ -94,7 +94,7 @@ cat(sprintf("Step 2 -- epochs: %d, best NLL: %.6f\n",
             as.integer(res_gate[[2]]$n_iter), min(unlist(res_gate[[2]]$hist))))
 ```
 
-Next, we apply causarray to estimate the causal effects of perturbations on gene expression. Here the 106 GFP control cells and the perturbation groups (median 89 cells) are approximately balanced. We therefore use pooled variance to retain power in this relatively small comparison. This is a dataset-specific choice: unequal variance remains preferable when arm sizes or effective sample sizes are meaningfully unbalanced, when pseudo-outcome variability differs between arms, and for the Replogle and case-control tutorials.
+Next, we apply causarray to estimate the causal effects of perturbations on gene expression. Here the 106 GFP control cells and the perturbation groups (median 89 cells) are similar in size, so we use pooled variance to retain power in this relatively small comparison. This is a dataset-specific choice: unequal variance is preferable when the treated and control groups differ meaningfully in size or effective sample size, when outcome variability differs between the two groups, and for the Replogle and case-control tutorials.
 
 ```{r}
 offsets <- log(res_gate[[2]][['kwargs_glm']][['size_factor']]) # use the precomputed size factors
@@ -166,12 +166,15 @@ knitr::asis_output(
 )
 ```
 
-We next estimate five-fold out-of-fold scores with the same balanced logistic
-model `LFC` uses internally. The overlap ratio is descriptive rather than a
-pass/fail threshold; the table also reports the fraction outside `[0.05, 0.95]`,
-the inverse-weight effective sample size (ESS), and the Brier score. These
-scores are raw, so we pass `clip_bounds = NULL` and `clipped_fraction` comes
-back as `NA` instead of a misleading zero.
+We next estimate five-fold out-of-fold (OOF) scores with the same balanced
+logistic model `LFC` uses internally; *out-of-fold* means each cell is scored by
+a model that was not trained on it. The overlap ratio is descriptive rather than
+a hard pass/fail threshold, though **0.25 is a reasonable rule-of-thumb floor**.
+The table also reports the fraction of scores outside `[0.05, 0.95]`, the
+effective sample size (ESS) of the inverse-probability weights — a fraction
+between 0 and 1 where larger is better — and the Brier score. These scores are
+raw, so we pass `clip_bounds = NULL` and `clipped_fraction` comes back as `NA`
+instead of a misleading zero.
 
 ```{r propensity-diagnostics}
 pi_oof <- causarray$estimate_propensity_scores(
@@ -199,15 +202,16 @@ knitr::asis_output(
 )
 ```
 
-Satb2 has the weakest overlap: its latent-factor diagnostics flag U9, and
-standardized log-library size is strongly associated with it as well.
+Satb2 has the weakest overlap: its latent-factor diagnostics flag both U8 and
+U9, and standardized log-library size is strongly associated with it as well.
 Propensity scores are fit one treatment at a time against the shared controls,
 so you can change the model for Satb2 alone and leave the other 28
 perturbations untouched. `refit_propensity_scores` refits only the treatments
-you name and returns an audit table next to the updated scores. Three
+you name and returns an audit table next to the updated scores. Four
 alternatives:
 
-- **drop U9** — remove the most imbalanced latent factor;
+- **drop U9** — remove the single most imbalanced latent factor;
+- **drop U8** — remove the other flagged latent factor instead;
 - **10x library penalty** — keep every covariate, but apply ten times the usual
   L2 penalty to standardized log-library size;
 - **Satb2 C=0.1** — keep every covariate and shrink all of them more strongly.
@@ -218,6 +222,7 @@ reuse the primary fit's cached `Y_hat`, so no outcome model is refitted.
 ```{r satb2-sensitivity}
 satb2_variants <- list(
   `drop U9` = list(drop_by_treatment = list(Satb2 = "U9")),
+  `drop U8` = list(drop_by_treatment = list(Satb2 = "U8")),
   `10x library penalty` = list(
     penalty_factors_by_treatment = list(Satb2 = list(log_library_size = 10))
   ),
@@ -263,18 +268,18 @@ satb2_overlap[, c(
 )]
 
 regularized_plot <- causarray$plot_propensity_scores(
-  A, oof_variants[["10x library penalty"]][[1]],
+  A, oof_variants[["Satb2 C=0.1"]][[1]],
   treatments = list("Satb2"), clip_bounds = NULL
 )
 invisible(regularized_plot[[1]]$suptitle(
-  "Satb2 after 10x library-size penalty", y = 1.02
+  "Satb2 after C=0.1 regularization", y = 1.02
 ))
 regularized_plot[[1]]$savefig(
-  "perturbseq-r_files/figure-markdown_github/satb2-library-penalty-1.png",
+  "perturbseq-r_files/figure-markdown_github/satb2-c01-regularized-1.png",
   dpi = 120L, bbox_inches = "tight"
 )
 knitr::asis_output(
-  "![](perturbseq-r_files/figure-markdown_github/satb2-library-penalty-1.png)"
+  "![](perturbseq-r_files/figure-markdown_github/satb2-c01-regularized-1.png)"
 )
 
 # Analysis scores reuse the cached outcome model, so no outcome model is refitted.
@@ -305,41 +310,61 @@ sensitivity_summary$discoveries_all <- sum(satb2_all$padj_all < 0.1, na.rm = TRU
 sensitivity_summary
 
 baseline_overlap <- subset(satb2_overlap, model == "all factors")
-drop_overlap <- subset(satb2_overlap, model == "drop U9")
+u9_overlap <- subset(satb2_overlap, model == "drop U9")
+u8_overlap <- subset(satb2_overlap, model == "drop U8")
 penalty_overlap <- subset(satb2_overlap, model == "10x library penalty")
 ridge_overlap <- subset(satb2_overlap, model == "Satb2 C=0.1")
-drop_effects <- subset(sensitivity_summary, model == "drop U9")
+u9_effects <- subset(sensitivity_summary, model == "drop U9")
+u8_effects <- subset(sensitivity_summary, model == "drop U8")
 penalty_effects <- subset(sensitivity_summary, model == "10x library penalty")
 ridge_effects <- subset(sensitivity_summary, model == "Satb2 C=0.1")
 ```
 
-**What the three variants show.** Dropping U9 barely moves anything: Satb2's
-overlap ratio goes from `r sprintf("%.3f", baseline_overlap$overlap_ratio)` to
-`r sprintf("%.3f", drop_overlap$overlap_ratio)` and the effects correlate at
-`r sprintf("%.3f", drop_effects$effect_correlation)`. The two shrinkage options
-buy real overlap — the 10x library penalty reaches
-`r sprintf("%.3f", penalty_overlap$overlap_ratio)` and lifts the control ESS
-fraction from
-`r sprintf("%.1f%%", 100 * baseline_overlap$ess_control_fraction)` to
-`r sprintf("%.1f%%", 100 * penalty_overlap$ess_control_fraction)`, while
-`C = 0.1` reaches `r sprintf("%.3f", ridge_overlap$overlap_ratio)` with only
-`r sprintf("%.1f%%", 100 * ridge_overlap$outside_overlap_fraction)` of scores
-left outside `[0.05, 0.95]`. Both cost calibration: the out-of-fold Brier score
-rises from `r sprintf("%.3f", baseline_overlap$brier_score)` to
-`r sprintf("%.3f", penalty_overlap$brier_score)` and
-`r sprintf("%.3f", ridge_overlap$brier_score)`, so the smoother scores are
-buying overlap with bias rather than predicting treatment better.
+**What the four variants show.** Which factor you drop matters, and neither
+single drop is the answer.
 
-Effects stay close throughout (correlation
-`r sprintf("%.3f", penalty_effects$effect_correlation)` and
-`r sprintf("%.3f", ridge_effects$effect_correlation)`) while discoveries move
-from `r format(penalty_effects$discoveries_all, big.mark = ",", trim = TRUE)`
-to `r format(penalty_effects$discoveries, big.mark = ",", trim = TRUE)` and
-`r format(ridge_effects$discoveries, big.mark = ",", trim = TRUE)`. Stable
-effects with gently falling power and worse calibration is what a well-behaved
-sensitivity analysis looks like. Report the variants alongside the primary fit
-so readers can see the spread — and if a conclusion holds under only one
-propensity specification, that is worth knowing before you rely on it.
+Dropping U9 — the single most imbalanced factor — does essentially nothing:
+overlap barely moves (`r sprintf("%.3f", baseline_overlap$overlap_ratio)` to
+`r sprintf("%.3f", u9_overlap$overlap_ratio)`, still below the 0.25 floor, so it
+does not fix the problem) and the effects are unchanged (correlation
+`r sprintf("%.3f", u9_effects$effect_correlation)`). Dropping U8 instead looks
+like a win — overlap jumps to `r sprintf("%.3f", u8_overlap$overlap_ratio)` — but
+it guts the control effective sample size, from
+`r sprintf("%.1f%%", 100 * baseline_overlap$ess_control_fraction)` to
+`r sprintf("%.1f%%", 100 * u8_overlap$ess_control_fraction)`, and destabilises the
+effects (correlation `r sprintf("%.3f", u8_effects$effect_correlation)`,
+discoveries `r format(u8_effects$discoveries, big.mark = ",", trim = TRUE)`); a
+high overlap ratio bought this way is misleading, because the estimate now rests
+on almost no effective controls. So the message is *not* "drop U9, keep U8":
+dropping U9 fixes nothing and dropping U8 does real damage. Factor-dropping is the
+wrong tool here — keep all the factors and regularise instead.
+
+Penalising the propensity model is reliable. The feature-specific 10x
+library-size penalty (overlap `r sprintf("%.3f", penalty_overlap$overlap_ratio)`)
+and, more simply, global `C = 0.1` both raise overlap above the 0.25 rule of thumb
+and in line with the other perturbations. `C = 0.1` reaches
+`r sprintf("%.3f", ridge_overlap$overlap_ratio)`, leaves only
+`r sprintf("%.1f%%", 100 * ridge_overlap$outside_overlap_fraction)` of scores
+outside `[0.05, 0.95]`, and keeps the effective sample sizes healthy (control
+`r sprintf("%.1f%%", 100 * ridge_overlap$ess_control_fraction)`, treated
+`r sprintf("%.1f%%", 100 * ridge_overlap$ess_treated_fraction)`) while the effects
+stay stable (correlation `r sprintf("%.3f", ridge_effects$effect_correlation)`).
+The only real cost is a modest rise in the out-of-fold Brier score, from
+`r sprintf("%.3f", baseline_overlap$brier_score)` to
+`r sprintf("%.3f", ridge_overlap$brier_score)`.
+
+For a small treatment (51 cells) this is a good trade. A penalised model
+deliberately accepts a little bias in return for propensity scores that are less
+variable and better supported, which makes the downstream estimate more
+trustworthy — exactly the overlapping, in-range scores reviewers ask for. The
+drop in discoveries (`r format(ridge_effects$discoveries_all, big.mark = ",", trim = TRUE)`
+to `r format(ridge_effects$discoveries, big.mark = ",", trim = TRUE)`) is not a
+loss: a conservative, well-supported list is the goal, not the largest one.
+
+In practice, applying `C = 0.1` to every perturbation is a sensible default. It
+gives up a little power on the well-behaved perturbations but spares you from
+hand-tuning the few problem cases like Satb2 — a good bargain when you have many
+analyses to run.
 
 
 ```{r, fig.width=12, fig.height=6}

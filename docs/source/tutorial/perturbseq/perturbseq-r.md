@@ -356,9 +356,9 @@ better — and the Brier score. These scores are raw, so we pass
 of a misleading zero.
 
 Formally, ESS is Kish’s effective sample size of the inverse-probability
-weights,
-$$\mathrm{ESS} = \frac{\left(\sum_i w_i\right)^2}{\sum_i w_i^2}, \qquad
-w_i = \begin{cases} 1/\hat{\pi}_i & \text{treated cells} \\ 1/(1-\hat{\pi}_i) & \text{control cells,} \end{cases}$$
+weights:
+
+$$\mathrm{ESS} = \frac{\left(\sum_i w_i\right)^2}{\sum_i w_i^2}, \qquad w_i = \begin{cases} 1/\hat{\pi}_i & \text{treated cells} \\ 1/(1-\hat{\pi}_i) & \text{control cells,} \end{cases}$$
 
 where $\hat{\pi}_i = P(\text{treated} \mid X_i)$ is the propensity
 score. Equal weights give $\mathrm{ESS}=n$ (fraction 1); a few dominant

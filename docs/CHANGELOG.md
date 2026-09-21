@@ -86,6 +86,15 @@ and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
   batch fitter on `[X | A]` with 200 columns was the 11-hour single-core stage
   of `estimate_r` on Replogle. Dispersion is the method-of-moments estimate
   from the Poisson fitted means, as before.
+- `LFC`'s outcome model (`fit_glm_auto(..., A=A, impute=...)`) uses the
+  structured solver on the joint model `[W | A]`, the same model the
+  statsmodels path fits gene by gene (`_USE_ONEHOT_FOR_IMPUTE`, default on).
+  On the Perturb-seq tutorial it takes 10.7 s against 46.8 s for the
+  statsmodels pool, with tau correlation 0.9987, median |d tau| 2e-4 and 7,460
+  of 7,468 / 7,482 discoveries shared. The crispyx per-perturbation fit on the
+  same data returned 1,049 coefficients above the `_FAST_MAX_COEF` trip-wire
+  and so had always fallen back to statsmodels, costing 30 s of crispyx plus
+  the full statsmodels run under `backend='fast'`.
 - The structured solver iterates only the genes that have not converged, so
   a few slow genes no longer cost full-matrix iterations (Replogle, n = 3,000,
   p = 8,563: 5 s at 7 columns, 14 s at 51, 20 s at 130, 132 s at 231, versus
@@ -105,6 +114,13 @@ and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
   the start passed for each `r` was dropped by `estimate`, so both
   initialisation GLMs were refit per `r`). The returned table gains a `time_s`
   column with the wall time per `r`.
+
+### Fixed
+
+- `estimate_disp_auto` returned `None` when neither the structured solver nor
+  crispyx applied (fewer than 50 genes, or no block of treatment indicators);
+  the gene-by-gene path masked this by estimating the dispersion itself. It
+  now falls back to `estimate_disp`, as its docstring always said.
 
 ### Deprecated
 

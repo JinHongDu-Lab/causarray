@@ -108,18 +108,19 @@ def test_estimate_disp_auto_with_onehot_block_is_close_to_dense_path():
 
 
 def test_onehot_impute_path_matches_statsmodels_reference():
-    """With _USE_ONEHOT_FOR_IMPUTE the imputed counterfactual means equal the
-    statsmodels 'original' backend's (same joint model), unlike the crispyx
-    per-perturbation fits."""
+    """With _USE_ONEHOT_FOR_IMPUTE (the default) the imputed counterfactual
+    means equal the statsmodels 'original' backend's (same joint model), unlike
+    the crispyx per-perturbation fits."""
     import causarray.gcate_glm as g
     Y, X, G, off, r, _ = _sim(n=500, p=60, dx=3, a=4, nb=True)
     with g._backend_override('original'):
         B_ref, (Y0_ref, Y1_ref), *_ = g.fit_glm_auto(Y, X, G, family='nb', disp_glm=r, offset=off, impute=True, n_jobs=1)
+    saved = g._USE_ONEHOT_FOR_IMPUTE
     g._USE_ONEHOT_FOR_IMPUTE = True
     try:
         B, (Y0, Y1), disp_out, offsets, dres = g.fit_glm_auto(Y, X, G, family='nb', disp_glm=r, offset=off, impute=True)
     finally:
-        g._USE_ONEHOT_FOR_IMPUTE = False
+        g._USE_ONEHOT_FOR_IMPUTE = saved
     assert Y0.shape == (500, 60, 4) and Y1.shape == (500, 60, 4)
     ok = (np.abs(B_ref) < 8).all(axis=1)             # genes without divergent coefficients
     np.testing.assert_allclose(B[ok], B_ref[ok], atol=1e-4, rtol=1e-4)

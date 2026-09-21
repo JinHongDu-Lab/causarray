@@ -59,13 +59,20 @@ perturbations per GCATE call) no longer fall back to gene-by-gene statsmodels.
 _ONEHOT_MIN_GROUPS: int = 2
 """Minimum number of disjoint one-hot columns for the structured solver."""
 
-_USE_ONEHOT_FOR_IMPUTE: bool = False
-"""Also use the structured solver for the counterfactual imputation path
-(``fit_glm_auto(..., A=A, impute=...)`` as called by :func:`LFC`).  It fits
-the joint model ``[W | A]`` once, exactly as the statsmodels reference does,
-and derives ``Y_hat`` for every treatment from the shared coefficients,
-instead of the crispyx per-perturbation binary fits.  Off by default pending
-the LFC-level validation in plan/20260921_glm_backend_benchmark_plan.md.
+_USE_ONEHOT_FOR_IMPUTE: bool = True
+"""Use the structured solver for the counterfactual imputation path as well
+(``fit_glm_auto(..., A=A, impute=...)`` as called by :func:`LFC`).  It fits the
+joint model ``[W | A]`` once, the same model the statsmodels path fits gene by
+gene, and derives ``Y_hat`` for every treatment from the shared coefficients.
+
+Enabled 2026-09-21 after the LFC-level comparison on the Perturb-seq tutorial
+(29 perturbations, 2,926 cells, 3,221 genes): 10.7 s against 46.8 s for the
+statsmodels pool, tau correlation 0.9987, median |d tau| 2e-4, 7,460 of
+7,468 / 7,482 discoveries shared.  The crispyx per-perturbation path on the
+same data produced 1,049 coefficients above ``_FAST_MAX_COEF`` (its two-stage
+fit diverges for sparse genes) and therefore always fell back to statsmodels,
+so before this change the ``'fast'`` LFC outcome model cost 30 s of crispyx
+plus the full statsmodels run.  Set to False to restore the previous routing.
 """
 
 _FAST_MAX_COEF: float = 1e4
@@ -605,4 +612,9 @@ def estimate_disp_auto(Y, X=None, A=None, Y_hat=None, disp_family='gaussian',
             return estimate_disp_fast(Y, X_disp, offset=offset, method='moments')
         except ImportError:
             pass  # crispyx import failed at call time; fall through
-    
+    # statsmodels / least-squares path (small p, no one-hot block, or crispyx
+    # unavailable).  Previously this function returned None here, which the
+    # gene-by-gene ``fit_glm`` tolerated because it estimates the dispersion
+    # itself; the structured imputation path needs the estimate up front.
+    return estimate_disp(Y, X, A=A, Y_hat=Y_hat, disp_family=disp_family,
+                         offset=offset, verbose=verbose, **kwargs)

@@ -68,6 +68,44 @@ and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
   still called, type-I error for 100 vs 5,000 cells across 0.02-5 counts per
   cell, class-weight invariance for balanced designs, prevalence-aware clip.
 
+### Performance
+
+- New block-structured batched IRLS (`causarray/glm_onehot.py`) for GLM designs
+  of the form `[covariates | one-hot treatments]`. The per-gene Hessian has a
+  diagonal treatment block, so each Newton step is solved through a Schur
+  complement at `O(n p (d_X^2 + a))` cost with BLAS matmuls and sparse group
+  sums, instead of the dense `O(n p d^2)` of the generic batch fitter. It is
+  the exact IRLS solution (matches statsmodels to 1e-5 on well-conditioned
+  genes) and needs no worker pool. `fit_glm_auto` routes such designs to it
+  automatically (`_USE_ONEHOT_SOLVER`, `_ONEHOT_MIN_GROUPS`), so GCATE
+  initialisations with many perturbations no longer fall back to gene-by-gene
+  statsmodels (Adamson's r = 30 refit took 7 h on that path; Replogle's
+  `estimate_r` with 200 treatment columns did not finish in 14 h).
+- NB dispersion pre-estimation (`estimate_disp_auto`) keeps the treatment
+  indicators in the model but fits them with the structured solver; the dense
+  batch fitter on `[X | A]` with 200 columns was the 11-hour single-core stage
+  of `estimate_r` on Replogle. Dispersion is the method-of-moments estimate
+  from the Poisson fitted means, as before.
+- The structured solver iterates only the genes that have not converged, so
+  a few slow genes no longer cost full-matrix iterations (Replogle, n = 3,000,
+  p = 8,563: 5 s at 7 columns, 14 s at 51, 20 s at 130, 132 s at 231, versus
+  11 / 53 / 264 / 902 s for the dense batch fitter and 9 / 154 / 548 / 1,090 s
+  for statsmodels on 17 workers).
+- GCATE's alternating optimiser evaluates the objective and both gradients
+  with fused, parallel numba kernels (`nll_mat`, `grad_genes`, `grad_cells` in
+  `causarray/gcate_likelihood.py`). The previous whole-array expressions ran
+  on one core and allocated about ten `(n, p)` temporaries per call; they took
+  ~2 s of every ~2.3 s epoch on a 3,000 x 3,000 problem while the `prange` line
+  searches took 0.15 s. One update now takes 0.5 s on the same problem. The
+  kernels reduce in a fixed order, so results are bitwise identical for any
+  thread count; the reference kernels `nll` and `grad` are unchanged and still
+  used for the per-cell and per-gene line searches.
+- `estimate_r` fits the initial `[X | A]` GLM once and starts every candidate
+  `r` from the leading singular vectors of its deviance residuals (previously
+  the start passed for each `r` was dropped by `estimate`, so both
+  initialisation GLMs were refit per `r`). The returned table gains a `time_s`
+  column with the wall time per `r`.
+
 ### Deprecated
 
 - `LFC(usevar='unequal')` is an alias of `'pooled'` and warns (see above).

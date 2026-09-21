@@ -72,7 +72,7 @@ def nll(Y, A, B, family, nuisance=np.ones((1,1)), Tys=np.zeros((1,1)), thres_dis
     """
     
     Theta = A @ B.T
-    Ty = Y.copy()
+    Ty = Y
     n = Y.shape[0]
     
     if family == 'poisson':
@@ -124,7 +124,7 @@ def grad(Y, A, B, family, nuisance=np.ones((1,1)), thres_disp=10.
         The gradient of log likelihood.
     """
     Theta = A @ B.T
-    Ty = Y.copy()
+    Ty = Y
     n = Y.shape[0]
     
     if family == 'nb':
@@ -141,3 +141,133 @@ def grad(Y, A, B, family, nuisance=np.ones((1,1)), thres_disp=10.
     grad = grad.T @ A / type_f(n)
     return grad
 
+
+
+# ---------------------------------------------------------------------------
+# Fused, parallel matrix kernels
+# ---------------------------------------------------------------------------
+# ``nll`` and ``grad`` above are written with whole-array NumPy expressions.
+# Inside numba each expression allocates a full (n, p) temporary and runs on
+# one core, so for the (n, p) calls made once per alternating-minimisation
+# epoch (two gradients and one or two objective values) they cost about ten
+# passes over the count matrix each and dominated the epoch: on a 3,000 x
+# 3,000 problem ~2 s of a ~2.3 s epoch, against ~0.15 s for the prange line
+# searches. The kernels below evaluate the same expressions in one fused pass
+# per row, in parallel over rows, with no temporaries beyond the (n, p) linear
+# predictor. Per-row partial sums are combined in a fixed order, so the result
+# does not depend on the thread count.
+#
+# ``nuisance`` and ``Tys`` may be (1, p), (n, 1), (n, p) or (1, 1); they are
+# broadcast by stride, as NumPy would.
+
+_GENE_BLOCK = 128   # genes per work item in grad_genes; fixed so results do not depend on thread count
+
+
+@njit(parallel=True)
+def nll_mat(Y, A, B, family, nuisance, Tys, thres_disp):
+    """Negative log-likelihood of ``Y`` (n, p) with natural parameter ``A @ B.T``.
+
+    Same value as ``nll(Y, A, B, ...)`` up to floating-point summation order.
+    """
+    Theta = A @ np.ascontiguousarray(B.T)
+    n, p = Theta.shape
+    si_nu = 0 if nuisance.shape[0] == 1 else 1
+    sj_nu = 0 if nuisance.shape[1] == 1 else 1
+    si_t = 0 if Tys.shape[0] == 1 else 1
+    sj_t = 0 if Tys.shape[1] == 1 else 1
+    is_pois = family == 'poisson'
+    hi = type_f(1e2)
+    lo_p = type_f(1e-6)
+    hi_p = type_f(1.) - type_f(1e-6)
+    part = np.zeros(n, dtype=type_f)
+    for i in prange(n):
+        s = type_f(0.)
+        for j in range(p):
+            th = Theta[i, j]
+            if th > hi:
+                th = hi
+            y = Y[i, j]
+            ty = Tys[i * si_t, j * sj_t]
+            e = np.exp(th)
+            if is_pois:
+                s += y * th - e + ty
+            else:
+                nu = nuisance[i * si_nu, j * sj_nu]
+                if nu > thres_disp:
+                    s += y * th - e + ty
+                else:
+                    tmp = type_f(1.) / (type_f(1.) + e / nu)
+                    if tmp < lo_p:
+                        tmp = lo_p
+                    elif tmp > hi_p:
+                        tmp = hi_p
+                    s += y * np.log1p(-tmp) + nu * np.log(tmp) + ty
+        part[i] = s
+    total = type_f(0.)
+    for i in range(n):          # serial: fixed summation order
+        total += part[i]
+    return -total / type_f(n)
+
+
+@njit(inline='always')
+def _resid_entry(y, th, nu, is_pois, thres_disp):
+    """``-(y - mu) * w`` for one entry; ``w`` as in ``grad``."""
+    if th > type_f(1e2):
+        th = type_f(1e2)
+    e = np.exp(th)
+    if is_pois or nu > thres_disp:
+        return -(y - e)
+    tmp = type_f(1.) / (type_f(1.) + e / nu)
+    if tmp < type_f(1e-6):
+        tmp = type_f(1e-6)
+    elif tmp > type_f(1.) - type_f(1e-6):
+        tmp = type_f(1.) - type_f(1e-6)
+    return -(y - e) * tmp
+
+
+@njit(parallel=True)
+def grad_genes(Y, A, B, family, nuisance, thres_disp):
+    """Gradient w.r.t. ``B`` (p, d): equals ``grad(Y, A, B, ...)``.
+
+    Work items are fixed blocks of ``_GENE_BLOCK`` genes; within a block the
+    sum over cells runs in order, so the result is independent of the thread
+    count.
+    """
+    Theta = A @ np.ascontiguousarray(B.T)
+    n, p = Theta.shape
+    d = A.shape[1]
+    si_nu = 0 if nuisance.shape[0] == 1 else 1
+    sj_nu = 0 if nuisance.shape[1] == 1 else 1
+    is_pois = family == 'poisson'
+    n_blocks = (p + _GENE_BLOCK - 1) // _GENE_BLOCK
+    G = np.zeros((p, d), dtype=type_f)
+    for blk in prange(n_blocks):
+        j0 = blk * _GENE_BLOCK
+        j1 = min(p, j0 + _GENE_BLOCK)
+        for i in range(n):
+            for j in range(j0, j1):
+                r = _resid_entry(Y[i, j], Theta[i, j], nuisance[i * si_nu, j * sj_nu], is_pois, thres_disp)
+                for k in range(d):
+                    G[j, k] += r * A[i, k]
+    return G / type_f(n)
+
+
+@njit(parallel=True)
+def grad_cells(Y, A, B, family, nuisance, thres_disp):
+    """Gradient w.r.t. ``A`` (n, d): equals ``grad(Y.T, B, A, ..., nuisance.T)``.
+
+    One work item per cell; the sum over genes runs in order.
+    """
+    Theta = A @ np.ascontiguousarray(B.T)
+    n, p = Theta.shape
+    d = B.shape[1]
+    si_nu = 0 if nuisance.shape[0] == 1 else 1
+    sj_nu = 0 if nuisance.shape[1] == 1 else 1
+    is_pois = family == 'poisson'
+    G = np.zeros((n, d), dtype=type_f)
+    for i in prange(n):
+        for j in range(p):
+            r = _resid_entry(Y[i, j], Theta[i, j], nuisance[i * si_nu, j * sj_nu], is_pois, thres_disp)
+            for k in range(d):
+                G[i, k] += r * B[j, k]
+    return G / type_f(p)

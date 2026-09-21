@@ -2,6 +2,7 @@ from causarray.gcate_opt import *
 import contextlib
 import pandas as pd
 from causarray.utils import comp_size_factor, _filter_params
+import time
 import causarray.gcate_glm as _gcate_glm  # module-qualified so _USE_FAST_BACKEND changes take effect at call time
 
 
@@ -248,8 +249,10 @@ def estimate_r(Y, X, A, r_max, c=1.,
     Returns
     -------
     df_r : DataFrame
-        DataFrame with columns ``r``, ``deviance``, ``nu``, ``JIC``, sorted by
-        ``r``.  The optimal ``r`` minimises the ``JIC`` column.
+        DataFrame with columns ``r``, ``deviance``, ``nu``, ``JIC`` and
+        ``time_s`` (wall time of the fit for that ``r``; for ``r = 0`` the
+        shared initial GLM), sorted by ``r``.  The optimal ``r`` minimises the
+        ``JIC`` column.
     """
     # ── Optional ctrl-priority subsampling ──────────────────────────────
     A_np = np.asarray(A) if not isinstance(A, pd.DataFrame) else A.values
@@ -291,37 +294,45 @@ def estimate_r(Y, X, A, r_max, c=1.,
         r_list = np.array(r_max, dtype=int)
     r_max = np.max(r_list)
 
-    # Estimate the residual deviance
+    # One GLM on ``[X | A]`` for the whole grid: its deviance residuals give
+    # the r_max leading singular vectors, and each candidate r starts from the
+    # first r of them (ordered by singular value).  Passing the start through
+    # ``A_init`` makes ``alter_min`` skip its own copy of this GLM, which is
+    # identical for every r.
+    t0 = time.perf_counter()
     res_glm = _gcate_glm.fit_glm_auto(Y, X, offset=np.log(size_factor[:,0]), family=family, disp_glm=nuisance[0], maxiter=100, verbose=False)
     u, s, vt = svds(res_glm[-1], k=r_max)
     if u.shape[1]<r_max:
         raise ValueError(f'The number of latent factors is larger than the rank of deviance residuals ({u.shape[1]}). Try to decrease the value of r.')
+    u = u[:, np.argsort(-s)]                      # svds returns ascending singular values
     Q, _ = sp.linalg.qr(X, mode='economic')
     Q = Q.astype(type_f)
     u_proj = u - Q @ (Q.T @ u)
     A1 = np.c_[X, u_proj]
+    t_glm = time.perf_counter() - t0
 
     logh = log_h(Y, family, nuisance)
     ll = 2 * ( 
-        nll(Y, X, res_glm[0], family, nuisance, size_factor) / p 
+        nll_mat(Y, X, res_glm[0], family, nuisance, size_factor, 10.) / p 
         - np.sum(logh) / (n*p) ) 
     nu = (d+a) * np.maximum(n,p) * np.log(n * p / np.maximum(n,p)) / (n*p)
     jic = ll + c * nu
-    res.append([0, ll, nu, jic])
+    res.append([0, ll, nu, jic, t_glm])
 
     for r in r_list[r_list > 0][::-1]:
+        t0 = time.perf_counter()
         _, res_2 = estimate(Y, X, r, a,
-            0, kwargs_glm, kwargs_ls_1, kwargs_es_1, kwargs_ls_2, kwargs_es_2, A=A1[:,:d+a+r], **kwargs)
-        A1, A2 = res_2['X_U'], res_2['B_Gamma']
+            0, kwargs_glm, kwargs_ls_1, kwargs_es_1, kwargs_ls_2, kwargs_es_2, A_init=A1[:,:d+a+r].copy(), **kwargs)
+        A_r, B_r = res_2['X_U'], res_2['B_Gamma']
 
         ll = 2 * ( 
-            nll(Y, A1, A2, family, nuisance, size_factor) / p 
+            nll_mat(Y, A_r, B_r, family, nuisance, size_factor, 10.) / p 
             - np.sum(logh) / (n*p) ) 
         nu = (d + a + r) * np.maximum(n,p) * np.log(n * p / np.maximum(n,p)) / (n*p)
         jic = ll + c * nu
-        res.append([r, ll, nu, jic])
+        res.append([r, ll, nu, jic, time.perf_counter() - t0])
 
-    df_r = pd.DataFrame(res, columns=['r', 'deviance', 'nu', 'JIC']).sort_values(by='r')
+    df_r = pd.DataFrame(res, columns=['r', 'deviance', 'nu', 'JIC', 'time_s']).sort_values(by='r')
     return df_r 
 
 

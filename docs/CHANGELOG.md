@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.0.10] - Unreleased
+
+Inference fix for small perturbation arms. Motivated by the SCARF mouse-brain
+Perturb-seq pilot (58 perturbations, 68-227 cells each), where 83% of the
+discoveries were genes with zero counts in the perturbed arm and real effects
+were estimated but not called. See `plan/20260920_lfc_inference_fix_plan.md`
+and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
+
+### Changed
+
+- `LFC` uses the influence-function variance `var(eta)/n` of the estimator
+  (`usevar='pooled'`) as its only variance estimator. `'unequal'` applied a
+  two-sample Welch formula by arm to an estimator that averages over all
+  cells; for equal arms it is exactly twice the correct standard error and
+  for rare treatments far more. After validation on the Perturb-seq, SEA-AD
+  and Adamson tutorials (point estimates unchanged or moved toward the raw
+  log-ratio; permutation and fake-perturbation nulls calibrated) the Welch
+  path was removed; `usevar='unequal'` is accepted as an alias of `'pooled'`
+  with a `FutureWarning` for one release.
+- `LFC`, `compute_causal_estimand`, `cross_fitting`,
+  `estimate_propensity_scores` and `refit_propensity_scores` default to
+  calibrated propensity scores (`class_weight=None`). The former
+  `'balanced'` default centred scores near 0.5 regardless of prevalence,
+  shrinking the AIPW correction by roughly twice the prevalence and turning
+  the estimator into an outcome-model plug-in. `'balanced'` remains available.
+- `ps_clip` defaults to `'auto'`: per treatment,
+  `lower = min(0.01, prevalence/10)` and symmetrically for the upper bound.
+  The fixed `(0.01, 0.99)` clipped every calibrated score of a treatment with
+  prevalence below 1%. Resolved bounds are returned as
+  `estimation['ps_clip_bounds']`.
+- `LFC` default `thres_min` is `'auto'`: a gene is tested only if its larger
+  arm mean implies about `min_counts` (new argument, default 5) expected
+  counts in the smaller arm, i.e. `mean >= 5 / min(n0, n1)`. This equals the
+  former 0.01 at 500 cells, 0.05 at 100 cells, and 0.007 at 700 cells, so
+  small arms are protected without discarding testable genes in large arms
+  (a fixed 0.05 removed 43% of Adamson pairs). The test is applied to the
+  observed arm means as well as the counterfactual means, because the
+  outcome model's prediction for an all-zero arm can be inflated.
+
+### Added
+
+- Model-based variance floor in `LFC`: the log-scale variance is bounded
+  below by `1/(n1*tau1) + 1/(n0*tau0)`, the Poisson lower bound for means
+  estimated from `n_k` cells. An arm whose cells all have zero counts has an
+  empirical influence-function variance of zero; the floor gives it a
+  standard error of at least ~1 for 100 cells, so chance all-zero arms of
+  sparse genes are no longer called while genuine complete knockouts remain
+  significant. The new `var_floored` column marks affected pairs. An arm
+  with no observed counts stays estimable at the floor (its AIPW mean is
+  exactly zero), so complete knockouts of expressed genes are reported
+  instead of being dropped as non-estimable.
+- Small-sample correction for in-sample nuisance fits (`K=1`): the pooled
+  variance is rescaled by `n/(n-d)` (`d` = outcome-model parameters) and
+  p-values use a t reference with `n-d` degrees of freedom. No-op for large
+  `n`; brings null t-statistics on 85-donor pseudo-bulk (SEA-AD) and
+  ~100-cell arms (Perturb-seq) from SD 1.08-1.10 to 1.0.
+- Per-pair support columns `n_treated`, `n_control`, `count_treated`,
+  `count_control`, plus `var_floored` and the pre-floor `std_raw`, in every
+  `LFC` result frame.
+- A `RuntimeWarning` when a treatment has fewer than 200 cells in one arm and
+  the variance floor bound for some genes, and a `RuntimeWarning` when
+  `backend='fast'` is requested but `crispyx` is not importable (previously a
+  silent fall-back to gene-by-gene statsmodels).
+- `tests/test_small_arm_inference.py`: oracle-simulation SE calibration for
+  prevalence 0.5%-50%, chance all-zero arm not called, complete knockout
+  still called, type-I error for 100 vs 5,000 cells across 0.02-5 counts per
+  cell, class-weight invariance for balanced designs, prevalence-aware clip.
+
+### Deprecated
+
+- `LFC(usevar='unequal')` is an alias of `'pooled'` and warns (see above).
+- `LFC(eps_var=...)` is ignored; the variance floor supersedes it.
+
 ## [0.0.9] - 2026-07-23
 
 ### Added

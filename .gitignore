@@ -189,3 +189,24 @@ docs/source/tutorial/replogle/replogle_propensity_batch12*
 
 # Unrelated tutorial directory (not part of causarray package docs)
 docs/source/tutorial/scp/
+
+# SCARF tutorial: raw source data (multi-GB) and generated intermediates
+# (regenerate with prep_scarf_data.py + SCARF-py.ipynb). Only the notebook,
+# prep script, and the small cached scarf-r.csv are tracked.
+docs/source/tutorial/SCARF/*.h5ad
+docs/source/tutorial/SCARF/*.pptx
+docs/source/tutorial/SCARF/scarf-gcate-results.pkl
+docs/source/tutorial/SCARF/scarf-lfc.csv
+docs/source/tutorial/SCARF/scarf-ps.pdf
+docs/source/tutorial/SCARF/scarf-scatter-causarray-vs-wilcoxon.pdf
+docs/source/tutorial/SCARF/scarf_lfc_batches/
+docs/source/tutorial/SCARF/scarf_investigation/
+docs/source/tutorial/*/validation_0.0.10/
+docs/source/tutorial/replogle/data/
+docs/source/tutorial/replogle/replogle_subset_lognorm_backup.h5ad
+docs/source/tutorial/replogle/replogle_results_0.0.10.h5
+docs/source/tutorial/replogle/run_batch_0.0.10.log
+docs/source/tutorial/replogle/run_batch_0.0.10.sh
+docs/source/tutorial/replogle/run_estimate_r_0.0.10.sh
+docs/source/tutorial/replogle/run_estimate_r_0.0.10.log
+docs/source/tutorial/replogle/*_lognorm_backup.*

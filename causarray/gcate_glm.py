@@ -67,6 +67,15 @@ def _backend_override(backend: str):
     global _USE_FAST_BACKEND
     old = _USE_FAST_BACKEND
     if backend == "fast":
+        if not _CRISPYX_AVAILABLE:
+            import warnings
+            warnings.warn(
+                "backend='fast' was requested but crispyx is not importable; "
+                "falling back to the gene-by-gene statsmodels backend, which is "
+                "much slower and can differ numerically. Install crispyx to use "
+                "the fast path.",
+                RuntimeWarning, stacklevel=3,
+            )
         _USE_FAST_BACKEND = True
     elif backend == "original":
         _USE_FAST_BACKEND = False

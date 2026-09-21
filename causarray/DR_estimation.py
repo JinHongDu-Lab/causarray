@@ -65,15 +65,19 @@ def _validate_clip(clip):
 
 def estimate_propensity_scores(
     A, X_A, K=1, ps_model='logistic', mask=None, clip=None,
-    random_state=0, verbose=False, class_weight='balanced', **kwargs,
+    random_state=0, verbose=False, class_weight=None, **kwargs,
 ):
     """Estimate per-treatment propensity scores.
 
     Each treatment is compared with the shared all-zero control group.  With
     ``K > 1``, every returned score is predicted by a model that did not train
-    on that cell. Logistic models use ``class_weight='balanced'`` by default,
-    matching :func:`LFC` and historical causarray fits. Pass
-    ``class_weight=None`` for calibrated treatment probabilities.
+    on that cell. Logistic models return calibrated treatment probabilities
+    (``class_weight=None``) by default, matching :func:`LFC`. Pass
+    ``class_weight='balanced'`` to reproduce pre-0.0.10 fits, whose scores are
+    centred near 0.5 regardless of prevalence.
+
+    .. versionchanged:: 0.0.10
+        Default ``class_weight`` changed from ``'balanced'`` to ``None``.
 
     Parameters
     ----------
@@ -94,9 +98,9 @@ def estimate_propensity_scores(
     random_state : int, optional
         Random seed used for fold construction and supported estimators.
     class_weight : str, dict or None, optional
-        Class weighting for logistic propensity estimation. The default
-        ``'balanced'`` matches :func:`LFC`; pass ``None`` for calibrated
-        probabilities.
+        Class weighting for logistic propensity estimation. ``None`` (default)
+        gives calibrated probabilities and matches :func:`LFC`;
+        ``'balanced'`` reproduces the pre-0.0.10 behaviour.
 
     Returns
     -------
@@ -204,7 +208,7 @@ def refit_propensity_scores(
     A, X_A, drop_by_treatment=None, pi_hat=None, treatment_names=None,
     covariate_names=None, penalty_factors_by_treatment=None, K=1,
     ps_model='logistic', mask=None, clip=None, random_state=0, verbose=False,
-    class_weight='balanced', **kwargs,
+    class_weight=None, **kwargs,
 ):
     """Refit propensity scores with treatment-specific covariate filtering.
 
@@ -270,6 +274,9 @@ def refit_propensity_scores(
     but drives ``score_std`` towards zero.
 
     .. versionadded:: 0.0.9
+    .. versionchanged:: 0.0.10
+        Default ``class_weight`` changed from ``'balanced'`` to ``None`` to
+        match :func:`estimate_propensity_scores` and :func:`LFC`.
     """
     if drop_by_treatment is None:
         drop_by_treatment = {}
@@ -471,8 +478,8 @@ def refit_propensity_scores(
 
 def cross_fitting(
     Y, A, X, X_A, family='poisson', K=1, glm_alpha=1e-4,
-    ps_model='logistic', ps_class_weight='balanced',
-    Y_hat=None, pi_hat=None, mask=None, ps_clip=(0.01, 0.99),
+    ps_model='logistic', ps_class_weight=None,
+    Y_hat=None, pi_hat=None, mask=None, ps_clip='auto',
     return_raw_pi=False, verbose=False, **kwargs):
     '''
     Cross-fitting for causal estimands.
@@ -496,9 +503,9 @@ def cross_fitting(
     ps_model : str, optional
         The propensity score model. The default is 'logistic'.
     ps_class_weight : str, dict or None, optional
-        Class weighting used by the propensity model. ``'balanced'`` preserves
-        the established ``LFC`` nuisance fit; pass ``None`` for calibrated
-        treatment probabilities.
+        Class weighting used by the propensity model. ``None`` (default since
+        0.0.10) gives calibrated treatment probabilities; ``'balanced'``
+        reproduces the pre-0.0.10 nuisance fit.
     
     Y_hat : array, optional
         Estimated potential outcome of shape (n, p, a, 2). The default is None.
@@ -507,8 +514,12 @@ def cross_fitting(
     mask : array, optional
         Boolean mask of shape (n, a) for the treatment, indicating which samples are used for 
         propensity-model fitting and the downstream estimand.
-    ps_clip : tuple(float, float) or None, optional
-        Bounds applied to scores used by AIPW. ``None`` disables clipping.
+    ps_clip : {'auto'}, tuple(float, float), (lower_array, upper_array) or None, optional
+        Bounds applied to scores used by AIPW. ``'auto'`` (default) resolves
+        to a prevalence-aware bound per treatment (see
+        :func:`causarray.DR_learner._resolve_ps_clip`); a pair of scalars
+        applies one bound to all treatments; a pair of length-``a`` arrays
+        gives per-treatment bounds; ``None`` disables clipping.
     return_raw_pi : bool, optional
         Return raw scores as a third result when true.
 
@@ -568,10 +579,18 @@ def cross_fitting(
     if ps_clip is None:
         pi_hat = pi_hat_raw.copy()
     else:
-        if len(ps_clip) != 2 or not 0 <= ps_clip[0] < ps_clip[1] <= 1:
+        if isinstance(ps_clip, str):
+            from causarray.DR_learner import _resolve_ps_clip
+            ps_clip = _resolve_ps_clip(ps_clip, A, mask)
+        if len(ps_clip) != 2:
             raise ValueError(
-                'ps_clip must be None or a pair 0 <= lower < upper <= 1')
-        pi_hat = np.clip(pi_hat_raw, ps_clip[0], ps_clip[1])
+                "ps_clip must be 'auto', None, or a pair 0 <= lower < upper <= 1")
+        lower = np.broadcast_to(np.asarray(ps_clip[0], dtype=float), (A.shape[1],))
+        upper = np.broadcast_to(np.asarray(ps_clip[1], dtype=float), (A.shape[1],))
+        if not (np.all(0 <= lower) and np.all(lower < upper) and np.all(upper <= 1)):
+            raise ValueError(
+                "ps_clip must be 'auto', None, or a pair 0 <= lower < upper <= 1")
+        pi_hat = np.clip(pi_hat_raw, lower[None, :], upper[None, :])
     fit_Y = True if Y_hat is None else False
     if fit_Y:
         _yhat_gb = Y.shape[0] * Y.shape[1] * A.shape[1] * 2 * 8 / 1e9

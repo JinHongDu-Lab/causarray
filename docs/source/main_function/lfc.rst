@@ -34,40 +34,50 @@ memory when loaded.
 Choosing the variance estimator
 -------------------------------
 
-``LFC`` defaults to ``usevar='unequal'`` (Welch inference), which estimates
-the treatment and control variances separately. Prefer this default when the
-treatment and control sample sizes, or their propensity-weighted effective
-sample sizes, are meaningfully unbalanced. Also retain it when arm-specific
-pseudo-outcome variances may differ and for case-control, bulk, and donor-level
-pseudo-bulk analyses. Independence of the rows does not imply equal
-treatment-arm variances: disease severity, biological response, residual
-composition, library size, treatment imbalance, and heterogeneous expression
-can all make pooled inference anti-conservative.
+Since 0.0.10 ``LFC`` uses ``usevar='pooled'``, the influence-function
+(sandwich) variance ``var(eta)/n`` of the AIPW estimator, where ``eta`` are the
+per-cell influence values of the log-ratio and ``n`` counts every cell that
+enters the estimand. With calibrated propensity scores this equals the
+efficient two-sample form ``Var(Y|A=1)/n1 + Var(Y|A=0)/n0`` up to the
+outcome-model correction, for balanced and unbalanced arms alike, and it
+matches the estimator's actual sampling variability in oracle simulations.
 
-For a small, approximately balanced perturbation comparison,
-``usevar='pooled'`` may provide better power when the independent sampling
-units and arm-specific pseudo-outcome variances are reasonably comparable.
-Treat it as an opt-in, empirically justified analysis rather than an automatic
-small-sample choice. Balanced counts alone do not justify pooling in a
-case-control study. Pooled inference can produce much smaller standard errors
-and substantially more discoveries. For a deliberately justified batched
-analysis, pass ``lfc_kwargs=dict(usevar='pooled')``.
+For in-sample nuisance fits (``K=1``, the default) the variance is rescaled by
+``n/(n-d)``, with ``d`` the number of outcome-model parameters, and p-values
+use a t reference with ``n-d`` degrees of freedom. Both are no-ops for large
+``n``; on donor-level pseudo-bulk data (tens of donors) and ~100-cell
+perturbation arms they remove the small-sample anti-conservativeness of the
+raw sandwich variance.
 
-There is no universal sample-size ratio at which the recommendation changes.
-Compare nominal arm sizes, propensity-weighted effective sample sizes,
-arm-specific pseudo-outcome variability, and the stability of discoveries
-under both estimators. Retain ``usevar='unequal'`` when these diagnostics do not
-support pooling.
+Two further safeguards apply to every gene:
 
-Donor-level independence alone does not establish equal arm variances. For
-example, the SEA-AD tutorial uses ``usevar='unequal'`` because disease severity,
-inter-individual response, residual cell composition, and library-size
-variation can produce different gene-wise variability between disease groups.
+* **Model-based variance floor.** The log-scale variance is bounded below by
+  ``1/(n1*tau1) + 1/(n0*tau0)``, the Poisson lower bound for arm means
+  estimated from ``n1`` and ``n0`` cells. An arm whose cells all have zero
+  counts has an empirical influence-function variance of zero; without the
+  floor the floored log mean is reported with a spuriously tiny standard error
+  and the pair is called. With ~100 perturbed cells the floor gives a standard
+  error of at least about 1, so a chance all-zero arm of a sparse gene is not
+  significant while a genuine complete knockout (``tau`` of -5 or more) still
+  is. The ``var_floored`` column marks affected pairs and ``std_raw`` reports
+  the pre-floor standard error.
+* **Expression threshold.** ``thres_min='auto'`` (default since 0.0.10)
+  requires about ``min_counts`` (5) expected counts in the smaller arm, i.e. a
+  larger-arm mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a
+  100-cell arm, 0.007 for a 700-cell arm. A fixed float can be passed
+  instead.
 
-Welch inference does not itself model within-subject correlation. Repeated
-cells from the same donor or experimental unit should still be pseudo-bulked
-or handled with cluster-aware inference; ``usevar='unequal'`` only protects
-against unequal arm variances.
+``usevar='unequal'`` (the 0.0.6-0.0.9 default) applied a two-sample Welch
+formula ``s0²/n0 + s1²/n1`` by arm. That is not the variance of an estimator
+that averages pseudo-outcomes over all cells: for equal arm sizes it is exactly
+twice the correct standard error, and for a rare treatment fitted with
+class-balanced propensity scores it is an order of magnitude too large, so
+real effects were estimated but not called. It was removed in 0.0.10 after
+re-validation on the Perturb-seq, SEA-AD and Adamson tutorials; the argument
+is accepted as an alias of ``'pooled'`` with a ``FutureWarning`` for one
+release. Neither estimator models within-donor correlation; repeated cells
+from one biological unit should still be pseudo-bulked or analysed with a
+cluster-aware method.
 
 Propensity diagnostics
 ----------------------
@@ -78,12 +88,23 @@ overfitting diagnostics.  :func:`summarize_propensity_scores` reports overlap,
 tail mass, and inverse-weight effective sample size, while
 :func:`plot_propensity_scores` compares treatment and control distributions.
 
-Both the standalone estimator and ``LFC`` use class-balanced logistic
-propensity fitting by default. This preserves historical causarray behavior and
-ensures that standalone overlap diagnostics describe the same nuisance model
-used for effect estimation. Pass ``class_weight=None`` to
-``estimate_propensity_scores`` or ``ps_class_weight=None`` to ``LFC`` for a
-calibrated-probability sensitivity analysis.
+Since 0.0.10 both the standalone estimator and ``LFC`` fit calibrated
+logistic propensity scores by default (``class_weight=None``), which is what
+the AIPW weights ``A/pi`` require. The former ``'balanced'`` default centred
+the scores near 0.5 whatever the prevalence; for a treatment with 0.6%
+prevalence that shrank the AIPW correction term by roughly twice the
+prevalence and turned the estimator into an outcome-model plug-in whose
+uncertainty the influence function no longer reflected. ``'balanced'`` remains
+available to reproduce earlier analyses. Because in-sample logistic fits with
+~100 cases against thousands of controls overstate separation, use out-of-fold
+scores (``K=5``) when judging overlap.
+
+Propensity scores used by AIPW are clipped with a prevalence-aware bound by
+default (``ps_clip='auto'``: ``lower = min(0.01, prevalence/10)`` per
+treatment, and symmetrically above). The fixed ``(0.01, 0.99)`` used before
+0.0.10 clipped every calibrated score of a treatment with prevalence below 1%.
+The resolved bounds are returned as ``estimation['ps_clip_bounds']`` and the
+raw scores as ``estimation['pi_hat_raw']``.
 
 ``LFC`` uses the standard AIPW pseudo-outcome, which may be negative for
 individual cells even though its counterfactual mean is positive. Individual
@@ -91,9 +112,17 @@ pseudo-outcomes are never clipped because doing so can bias the arm means,
 particularly when a large shared control group is compared with much smaller
 treatment groups.
 
-For a calibrated-propensity sensitivity analysis, use
-``LFC(..., ps_class_weight=None)`` and diagnose the matching scores with
-``estimate_propensity_scores(..., class_weight=None)``.
+Small perturbation arms
+-----------------------
+
+Screens with fewer than ~200 cells per perturbation and thousands of shared
+controls are the regime in which the pre-0.0.10 defaults failed (SCARF
+tutorial, "Investigation" section): 83% of discoveries were genes with zero
+counts in the perturbed arm, and real effects had t-statistics halved by the
+Welch formula. In this regime inspect the ``count_treated`` and
+``var_floored`` columns, keep the default expression threshold, and expect a
+``RuntimeWarning`` listing how many pairs the variance floor
+bound.
 
 Treatment-specific covariate diagnostics
 ----------------------------------------

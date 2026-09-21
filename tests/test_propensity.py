@@ -28,9 +28,10 @@ def test_intercept_only_scores_respect_class_weight():
     A[60:80, 0] = 1
     A[80:100, 1] = 1
 
-    balanced = estimate_propensity_scores(A, np.ones((100, 1)))
-    calibrated = estimate_propensity_scores(
-        A, np.ones((100, 1)), class_weight=None)
+    # Since 0.0.10 the default is calibrated; 'balanced' is the legacy option.
+    calibrated = estimate_propensity_scores(A, np.ones((100, 1)))
+    balanced = estimate_propensity_scores(
+        A, np.ones((100, 1)), class_weight='balanced')
 
     np.testing.assert_allclose(balanced, 0.5)
     np.testing.assert_allclose(calibrated[:, 0], 0.25)
@@ -45,8 +46,8 @@ def test_calibrated_option_improves_probability_calibration():
     A = rng.binomial(1, true_pi)
     X = np.c_[np.ones(n), z]
 
-    balanced = estimate_propensity_scores(A, X)
-    calibrated = estimate_propensity_scores(A, X, class_weight=None)
+    calibrated = estimate_propensity_scores(A, X)
+    balanced = estimate_propensity_scores(A, X, class_weight='balanced')
 
     assert abs(calibrated.mean() - A.mean()) < 0.02
     assert abs(balanced.mean() - A.mean()) > 0.15
@@ -114,7 +115,7 @@ def test_cross_fitting_can_return_raw_and_clipped_scores():
     assert clipped.min() >= 0.1 and clipped.max() <= 0.9
 
 
-def test_cross_fitting_preserves_balanced_default_and_allows_calibrated_scores():
+def test_cross_fitting_defaults_to_calibrated_and_allows_balanced_scores():
     rng = np.random.default_rng(31)
     n, p = 300, 3
     z = rng.standard_normal(n)
@@ -123,15 +124,15 @@ def test_cross_fitting_preserves_balanced_default_and_allows_calibrated_scores()
     Y = rng.poisson(2, (n, p)).astype(float)
     Y_hat = np.ones((n, p, 1, 2))
 
-    _, _, legacy = cross_fitting(
-        Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-    )
     _, _, calibrated = cross_fitting(
         Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-        ps_class_weight=None,
     )
-    expected_calibrated = estimate_propensity_scores(A, X, class_weight=None)
-    expected_legacy = estimate_propensity_scores(A, X)
+    _, _, legacy = cross_fitting(
+        Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
+        ps_class_weight='balanced',
+    )
+    expected_calibrated = estimate_propensity_scores(A, X)
+    expected_legacy = estimate_propensity_scores(A, X, class_weight='balanced')
 
     np.testing.assert_allclose(calibrated, expected_calibrated)
     np.testing.assert_allclose(legacy, expected_legacy)
@@ -150,11 +151,11 @@ def test_deprecated_class_weight_overrides_default():
     with pytest.warns(FutureWarning, match='ps_class_weight'):
         _, _, raw = cross_fitting(
             Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-            class_weight=None,
+            class_weight='balanced',
         )
 
     np.testing.assert_allclose(
-        raw, estimate_propensity_scores(A, X, class_weight=None))
+        raw, estimate_propensity_scores(A, X, class_weight='balanced'))
 
 
 def test_propensity_summary_and_plot_for_named_treatments():

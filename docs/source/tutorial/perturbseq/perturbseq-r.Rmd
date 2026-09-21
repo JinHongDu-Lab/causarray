@@ -94,12 +94,11 @@ cat(sprintf("Step 2 -- epochs: %d, best NLL: %.6f\n",
             as.integer(res_gate[[2]]$n_iter), min(unlist(res_gate[[2]]$hist))))
 ```
 
-Next, we apply causarray to estimate the causal effects of perturbations on gene expression. Here the 106 GFP control cells and the perturbation groups (median 89 cells) are similar in size, so we use pooled variance to retain power in this relatively small comparison. This is a dataset-specific choice: unequal variance is preferable when the treated and control groups differ meaningfully in size or effective sample size, when outcome variability differs between the two groups, and for the Replogle and case-control tutorials.
+Next, we apply causarray to estimate the causal effects of perturbations on gene expression. Since causarray 0.0.10, `LFC` uses the influence-function variance of the AIPW estimator for every design (the former `usevar` choice between pooled and Welch variances is gone; see the LFC documentation), with calibrated propensity scores and a model-based variance floor. The 106 GFP control cells and the perturbation groups (median 89 cells) are similar in size, so the calibrated scores coincide almost exactly with the class-balanced scores used in earlier versions of this tutorial and the results are essentially unchanged.
 
 ```{r}
 offsets <- log(res_gate[[2]][['kwargs_glm']][['size_factor']]) # use the precomputed size factors
-res <- causarray$LFC(Y, cbind(X, U), A, cbind(X_A, U), offset=offsets,
-                    usevar="pooled", verbose=TRUE)
+res <- causarray$LFC(Y, cbind(X, U), A, cbind(X_A, U), offset=offsets, verbose=TRUE)
 ```
 
 ```{r}
@@ -166,8 +165,8 @@ knitr::asis_output(
 )
 ```
 
-We next estimate five-fold out-of-fold (OOF) scores with the same balanced
-logistic model `LFC` uses internally; *out-of-fold* means each cell is scored by
+We next estimate five-fold out-of-fold (OOF) scores with the same calibrated
+logistic model `LFC` uses internally by default since causarray 0.0.10; *out-of-fold* means each cell is scored by
 a model that was not trained on it. The overlap ratio is descriptive rather than
 a hard pass/fail threshold, though **0.25 is a reasonable rule-of-thumb floor**.
 The table also reports the fraction of scores outside `[0.05, 0.95]`, the
@@ -185,7 +184,7 @@ $\mathrm{ESS}=n$ (fraction 1); a few dominant weights push it toward 0.
 
 ```{r propensity-diagnostics}
 pi_oof <- causarray$estimate_propensity_scores(
-  A, W_A, K = 5L, class_weight = "balanced", random_state = 0L
+  A, W_A, K = 5L, random_state = 0L
 )
 ps_summary <- causarray$summarize_propensity_scores(
   A, pi_oof, clip_bounds = NULL
@@ -239,7 +238,7 @@ satb2_variants <- list(
 refit_satb2 <- function(pi_hat, K, options) {
   do.call(causarray$refit_propensity_scores, c(
     list(A, W_A, pi_hat = pi_hat, covariate_names = propensity_names,
-         K = K, class_weight = "balanced", random_state = 0L),
+         K = K, random_state = 0L),
     options
   ))
 }
@@ -299,7 +298,7 @@ sensitivity_summary <- do.call(rbind, lapply(names(satb2_variants), function(nam
   analysis <- refit_satb2(estimation[["pi_hat_raw"]], 1L, satb2_variants[[name]])
   fit <- causarray$LFC(
     Y, cbind(X, U), A, W_A,
-    offset = offsets, usevar = "pooled",
+    offset = offsets,
     Y_hat = estimation[["Y_hat"]], pi_hat = analysis[[1]]
   )
   alternative <- subset(

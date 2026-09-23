@@ -11,9 +11,9 @@ import scipy.sparse as sp
 
 import causarray.gcate_glm as gcate_glm
 from causarray.nb_glm_fast import (
-    _compute_poisson_deviance_residuals,
     _maybe_densify,
     _SPARSE_WARN_GB,
+    fit_glm_fast,
 )
 
 
@@ -36,26 +36,38 @@ def _make_X(n: int, d: int, seed: int = 1) -> np.ndarray:
 # Poisson deviance residuals
 # ---------------------------------------------------------------------------
 
-class TestPoissonDevianceResiduals:
-    def test_y0_cells_give_correct_residual(self):
-        """When Y=0, deviance = 2*mu so signed resid = -sqrt(2*mu)."""
-        mu = np.array([[1.0, 2.0, 0.5]])
-        Y = np.zeros_like(mu)
-        resid = _compute_poisson_deviance_residuals(Y, mu)
-        expected = -np.sqrt(2.0 * mu)
-        np.testing.assert_allclose(resid, expected, rtol=1e-9)
+class TestDevianceResiduals:
+    """Deviance residuals come from crispyx; check the contract fit_glm_fast keeps."""
 
-    def test_y_equal_mu_gives_zero(self):
-        """When Y == mu the deviance residual should be (near) zero."""
-        mu = np.array([[3.0, 1.0]])
-        resid = _compute_poisson_deviance_residuals(mu.copy(), mu)
-        np.testing.assert_allclose(resid, 0.0, atol=1e-9)
+    @staticmethod
+    def _fit(family):
+        rng = np.random.default_rng(3)
+        n, p = 120, 60
+        Y = rng.poisson(4.0, (n, p)).astype(np.float64)
+        X = np.c_[np.ones(n), rng.standard_normal(n)]
+        B, Yhat, disp, _, resid = fit_glm_fast(Y, X, family=family)
+        return Y, Yhat, resid
 
-    def test_positive_sign_when_y_gt_mu(self):
-        Y = np.array([[5.0]])
-        mu = np.array([[2.0]])
-        resid = _compute_poisson_deviance_residuals(Y, mu)
-        assert resid[0, 0] > 0
+    def test_shape_and_finiteness(self):
+        Y, Yhat, resid = self._fit("poisson")
+        assert resid.shape == Y.shape
+        assert np.all(np.isfinite(resid))
+
+    def test_sign_follows_y_minus_mu(self):
+        """A residual is signed by whether the cell over- or under-shoots the fit."""
+        Y, Yhat, resid = self._fit("poisson")
+        differs = Y != Yhat
+        assert np.all(np.sign(resid[differs]) == np.sign((Y - Yhat)[differs]))
+
+    def test_nb_residuals_are_smaller_than_poisson(self):
+        """Over-dispersed counts: the NB deviance must not exceed the Poisson one."""
+        rng = np.random.default_rng(5)
+        n, p = 150, 60
+        Y = rng.negative_binomial(2, 0.2, (n, p)).astype(np.float64)
+        X = np.ones((n, 1))
+        _, _, _, _, resid_pois = fit_glm_fast(Y, X, family="poisson")
+        _, _, _, _, resid_nb = fit_glm_fast(Y, X, family="nb")
+        assert np.mean(resid_nb ** 2) < np.mean(resid_pois ** 2)
 
 
 # ---------------------------------------------------------------------------
@@ -112,28 +124,49 @@ class TestCrispyxFallback:
 # Fast-path threshold (_FAST_MAX_D)
 # ---------------------------------------------------------------------------
 
-class TestFastMaxDThreshold:
-    def test_fast_max_d_default_is_50(self):
-        assert gcate_glm._FAST_MAX_D == 50
+class TestFastMinPThreshold:
+    """Gene count, not design width, is what keeps a call off the batched path."""
 
-    def test_d_eff_under_threshold_uses_fast(self):
-        """d_eff <= 50 should take the crispyx path (when crispyx available and enabled)."""
+    def test_fast_min_p_default_is_10(self):
+        assert gcate_glm._FAST_MIN_P == 10
+
+    def test_enough_genes_uses_fast(self):
         if not gcate_glm._CRISPYX_AVAILABLE:
             pytest.skip("crispyx not installed")
 
-        # n*p/d_eff² must exceed 5_000 to pass the throughput heuristic.
-        # Use d=2 so d_eff²=4: n*p/4 = 200*5000/4 = 250,000 > 5000 ✓
-        n, p, d = 200, 5000, 2
+        n, p, d = 200, 60, 2
         Y = _make_counts(n, p)
         X = _make_X(n, d)
 
         with patch.object(gcate_glm, "fit_glm_fast", wraps=gcate_glm.fit_glm_fast) as mock_ff:
             gcate_glm.fit_glm_auto(Y, X, family="nb")
-            assert mock_ff.called, "fit_glm_fast should be called when throughput heuristic passes"
+            assert mock_ff.called
 
-    def test_old_threshold_16_now_passes_fast_path(self):
-        """Design with d_eff=16 previously blocked by d_eff<=15; must now hit fast path."""
-        assert gcate_glm._FAST_MAX_D >= 16, "Threshold must allow d_eff=16"
+    def test_too_few_genes_uses_statsmodels(self):
+        n, p, d = 100, 4, 2
+        Y = _make_counts(n, p)
+        X = _make_X(n, d)
+
+        with patch.object(gcate_glm, "fit_glm_fast") as mock_ff:
+            gcate_glm.fit_glm_auto(Y, X, family="nb")
+            assert not mock_ff.called
+
+    def test_wide_design_still_uses_fast(self):
+        """The old _FAST_MAX_D = 50 cap sent wide screens to statsmodels for hours."""
+        if not gcate_glm._CRISPYX_AVAILABLE:
+            pytest.skip("crispyx not installed")
+
+        rng = np.random.default_rng(11)
+        n, p, a = 300, 60, 60
+        Y = _make_counts(n, p)
+        X = np.c_[np.ones(n), rng.standard_normal(n)]
+        A = np.zeros((n, a))
+        for k in range(a):
+            A[k * 4 : (k + 1) * 4, k] = 1
+
+        with patch.object(gcate_glm, "fit_glm_fast", wraps=gcate_glm.fit_glm_fast) as mock_ff:
+            gcate_glm.fit_glm_auto(Y, X, A=A, family="nb")
+            assert mock_ff.called
 
 
 # ---------------------------------------------------------------------------
@@ -229,202 +262,70 @@ class TestBackendPropagation:
 # Weighted dispersion average
 # ---------------------------------------------------------------------------
 
-class TestWeightedDispersion:
-    def test_weighted_disp_closer_to_large_group(self):
-        """With unbalanced treatment groups, disp estimate weighted by cell count."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
+class TestJointTreatmentFit:
+    """Multi-treatment designs are fitted jointly by crispyx's structured solver."""
 
-        from causarray.nb_glm_fast import _fit_glm_fast_per_perturbation
-
-        rng = np.random.default_rng(7)
-        n_ctrl, n_small, n_large = 200, 20, 200
-        p = 50
-
-        n = n_ctrl + n_small + n_large
-        Y = rng.negative_binomial(5, 0.5, (n, p)).astype(np.float64)
-        X = np.ones((n, 1))
-        A = np.zeros((n, 2))
-        A[n_ctrl:n_ctrl + n_small, 0] = 1
-        A[n_ctrl + n_small:, 1] = 1
-
-        B, Yhat, disp_out, _, resid = _fit_glm_fast_per_perturbation(
-            Y, X, A, a=2, d=1, p=p, n=n,
-            family="nb", disp_glm=None,
-            impute=False, X_test=None,
-            offset_arr=np.zeros(n),
-            offsets=None,
-            maxiter=10, verbose=False,
-        )
-        assert disp_out is not None
-        assert np.all(np.isfinite(disp_out))
-        assert disp_out.shape == (p,)
-
-
-# ---------------------------------------------------------------------------
-# Control-cell residuals from global model
-# ---------------------------------------------------------------------------
-
-class TestControlCellResiduals:
-    def test_control_cell_resid_not_overwritten(self):
-        """Control-cell residuals must be consistent across perturbations (from global model)."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
-
-        from causarray.nb_glm_fast import _fit_glm_fast_per_perturbation
-
-        rng = np.random.default_rng(99)
-        n_ctrl = 100
-        n_per_pert = 50
-        a = 3
-        p = 40
-
+    @staticmethod
+    def _data(n_ctrl=120, n_per_pert=40, a=3, p=60, seed=99):
+        rng = np.random.default_rng(seed)
         n = n_ctrl + n_per_pert * a
         Y = rng.negative_binomial(3, 0.5, (n, p)).astype(np.float64)
         X = np.ones((n, 1))
         A = np.zeros((n, a))
         for k in range(a):
-            start = n_ctrl + k * n_per_pert
-            A[start:start + n_per_pert, k] = 1
+            A[n_ctrl + k * n_per_pert : n_ctrl + (k + 1) * n_per_pert, k] = 1
+        return Y, X, A, n_ctrl
 
-        ctrl_idx = np.arange(n_ctrl)
+    def test_coefficients_follow_caller_column_order(self):
+        """B is laid out as [X | A], whatever the solver does internally."""
+        Y, X, A, _ = self._data()
+        B, Yhat, disp, _, resid = fit_glm_fast(Y, X, A=A, family="nb")
+        assert B.shape == (Y.shape[1], X.shape[1] + A.shape[1])
+        assert np.all(np.isfinite(B))
 
-        B, Yhat, disp_out, _, resid = _fit_glm_fast_per_perturbation(
-            Y, X, A, a=a, d=1, p=p, n=n,
-            family="nb", disp_glm=None,
-            impute=False, X_test=None,
-            offset_arr=np.zeros(n), offsets=None,
-            maxiter=10, verbose=False,
-        )
+    def test_dispersion_is_per_gene_and_finite(self):
+        Y, X, A, _ = self._data()
+        _, _, disp, _, _ = fit_glm_fast(Y, X, A=A, family="nb")
+        assert disp.shape == (Y.shape[1],)
+        assert np.all(np.isfinite(disp)) and np.all(disp > 0)
 
-        assert np.all(np.isfinite(resid[ctrl_idx]))
-        assert np.all(Yhat[ctrl_idx] > 0)
+    def test_control_cells_are_fitted_too(self):
+        """Every cell gets a fitted mean and a residual, controls included."""
+        Y, X, A, n_ctrl = self._data()
+        _, Yhat, _, _, resid = fit_glm_fast(Y, X, A=A, family="nb")
+        ctrl = np.arange(n_ctrl)
+        assert np.all(np.isfinite(resid[ctrl]))
+        assert np.all(Yhat[ctrl] > 0)
 
+    def test_agrees_with_statsmodels(self):
+        """The joint fit is the same model the gene-by-gene path fits."""
+        Y, X, A, _ = self._data(n_ctrl=150, n_per_pert=50, a=2, p=60, seed=4)
+        B_fast, _, _, _, _ = fit_glm_fast(Y, X, A=A, family="poisson")
+        with gcate_glm._backend_override("original"):
+            B_slow, _, _, _, _ = gcate_glm.fit_glm(Y, X, A=A, family="poisson")
+        assert np.max(np.abs(B_fast - B_slow)) < 1e-4
 
-# ---------------------------------------------------------------------------
-# Per-perturbation Stage-2 GLM loop
-# ---------------------------------------------------------------------------
-
-class TestPerPerturbationStage2:
-    def test_multi_treatment_uses_one_stage2_fit_per_perturbation(self):
-        """Multi-column A should use the historical per-perturbation GLM loop."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
-
-        from causarray.nb_glm_fast import _fit_glm_fast_per_perturbation
-        from crispyx.glm import NBGLMBatchFitter
-
-        rng = np.random.default_rng(123)
-        n, p, a = 72, 10, 3
-        Y = rng.poisson(2.0, (n, p)).astype(np.float64)
+    def test_non_onehot_treatment_falls_back_to_dense(self):
+        """A continuous treatment has no group structure; the dense solver takes it."""
+        rng = np.random.default_rng(8)
+        n, p = 200, 60
+        Y = rng.negative_binomial(3, 0.5, (n, p)).astype(np.float64)
         X = np.ones((n, 1))
-        A = np.zeros((n, a))
-        for k in range(a):
-            A[18 + k * 12 : 18 + (k + 1) * 12, k] = 1
-
-        real = NBGLMBatchFitter.fit_batch_with_joint_offsets
-
-        def _spy(self, *args, **kwargs):
-            return real(self, *args, **kwargs)
-
-        with patch.object(
-            NBGLMBatchFitter,
-            "fit_batch_with_joint_offsets",
-            autospec=True,
-            side_effect=_spy,
-        ) as mock_fit:
-            _fit_glm_fast_per_perturbation(
-                Y, X, A, a=a, d=1, p=p, n=n,
-                family="poisson", disp_glm=None,
-                impute=False, X_test=None,
-                offset_arr=np.zeros(n),
-                offsets=None,
-                maxiter=3, verbose=False,
-            )
-
-        assert mock_fit.call_count == a
+        A = rng.standard_normal((n, 1))
+        B, Yhat, disp, _, resid = fit_glm_fast(Y, X, A=A, family="nb")
+        assert B.shape == (p, 2)
+        assert np.all(np.isfinite(B))
 
 
 # ---------------------------------------------------------------------------
-# Stage-1 subsample random_state inheritance
+# Memory limits — imputation tensors
 # ---------------------------------------------------------------------------
 
-class TestStage1RandomState:
-    def test_fit_glm_fast_passes_random_state_to_per_perturbation(self):
-        """Public fit_glm_fast must thread random_state into the multi-A path."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
-
-        from causarray import nb_glm_fast as _nbgf
-
-        rng = np.random.default_rng(456)
-        n, p, a = 40, 5, 2
-        Y = rng.poisson(2.0, (n, p)).astype(np.float64)
-        X = np.ones((n, 1))
-        A = np.zeros((n, a))
-        A[10:20, 0] = 1
-        A[20:30, 1] = 1
-
-        observed = {}
-
-        def _stub(*args, **kwargs):
-            observed["random_state"] = kwargs.get("random_state")
-            _, _, _, a_arg, d_arg, p_arg, n_arg = args[:7]
-            return (
-                np.zeros((p_arg, d_arg + a_arg)),
-                np.zeros((n_arg, p_arg)),
-                None,
-                None,
-                np.zeros((n_arg, p_arg)),
-            )
-
-        with patch.object(_nbgf, "_fit_glm_fast_per_perturbation", side_effect=_stub):
-            _nbgf.fit_glm_fast(
-                Y, X, A=A, family="poisson", random_state=123,
-            )
-
-        assert observed["random_state"] == 123
-
-    def test_stage1_subsample_uses_caller_random_state(self):
-        """For n > 3000, Stage-1 sampling must seed from random_state."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
-
-        from causarray.nb_glm_fast import _fit_glm_fast_per_perturbation
-
-        rng = np.random.default_rng(321)
-        n, p, a = 3001, 2, 2
-        Y = rng.poisson(2.0, (n, p)).astype(np.float64)
-        X = np.ones((n, 1))
-        A = np.zeros((n, a))
-        A[1000:2000, 0] = 1
-        A[2000:, 1] = 1
-
-        with patch("numpy.random.default_rng", wraps=np.random.default_rng) as mock_rng:
-            _fit_glm_fast_per_perturbation(
-                Y, X, A, a=a, d=1, p=p, n=n,
-                family="poisson", disp_glm=None,
-                impute=False, X_test=None,
-                offset_arr=np.zeros(n),
-                offsets=None,
-                maxiter=1, verbose=False,
-                random_state=123,
-            )
-
-        assert any(call.args == (123,) for call in mock_rng.call_args_list)
-
-
-# ---------------------------------------------------------------------------
-# Memory limits — per-perturbation imputation arrays
-# ---------------------------------------------------------------------------
-
-class TestMemoryLimitPerPerturbation:
+class TestMemoryLimitImputation:
     """mem_limit_gb below the imputation array size → float32 allocation + warning."""
 
     @staticmethod
-    def _run_per_pert(n, p, a, mem_limit_gb, impute=True):
-        from causarray.nb_glm_fast import _fit_glm_fast_per_perturbation
-
+    def _run(n, p, a, mem_limit_gb, impute=True, fit=None):
         if not gcate_glm._CRISPYX_AVAILABLE:
             pytest.skip("crispyx not installed")
 
@@ -436,70 +337,53 @@ class TestMemoryLimitPerPerturbation:
         per = (n - n_ctrl) // a
         for k in range(a):
             A[n_ctrl + k * per : n_ctrl + (k + 1) * per, k] = 1
-        X_test = X.copy() if impute else None
 
-        return _fit_glm_fast_per_perturbation(
-            Y, X, A, a=a, d=1, p=p, n=n,
-            family="nb", disp_glm=None,
-            impute=(X_test is not None), X_test=X_test,
-            offset_arr=np.zeros(n), offsets=None,
-            maxiter=10, verbose=False,
-            mem_limit_gb=mem_limit_gb,
+        fit = fit or fit_glm_fast
+        return fit(
+            Y, X, A=A, family="nb", impute=X.copy() if impute else False,
+            maxiter=10, mem_limit_gb=mem_limit_gb,
         )
 
     def test_below_limit_uses_float32_and_warns(self):
-        """Setting mem_limit_gb below imputation cost → float32 Yhat_0/1 + ResourceWarning."""
-        n, p, a = 100, 40, 3
-        true_gb = n * p * a * 2 * 8 / 1e9
-        tiny_limit = true_gb * 0.5
+        n, p, a = 100, 60, 3
+        tiny_limit = n * p * a * 2 * 8 / 1e9 * 0.5
 
         with pytest.warns(ResourceWarning, match="mem_limit_gb"):
-            B, Yhat, disp_out, _, resid = self._run_per_pert(n, p, a, mem_limit_gb=tiny_limit)
+            _, Yhat, _, _, _ = self._run(n, p, a, mem_limit_gb=tiny_limit)
 
         Yhat_0, Yhat_1 = Yhat
-        assert Yhat_0.dtype == np.float32, f"Expected float32, got {Yhat_0.dtype}"
-        assert Yhat_1.dtype == np.float32, f"Expected float32, got {Yhat_1.dtype}"
-        assert Yhat_0.shape == (n, p, a)
-        assert Yhat_1.shape == (n, p, a)
-        assert np.all(np.isfinite(Yhat_0))
-        assert np.all(np.isfinite(Yhat_1))
+        assert Yhat_0.dtype == Yhat_1.dtype == np.float32
+        assert Yhat_0.shape == Yhat_1.shape == (n, p, a)
+        assert np.all(np.isfinite(Yhat_0)) and np.all(np.isfinite(Yhat_1))
 
     def test_above_limit_stays_float64(self):
-        """When mem_limit_gb is larger than the cost, float64 is preserved."""
-        n, p, a = 100, 40, 3
-        large_limit = 1e6
-
         with warnings.catch_warnings():
             warnings.simplefilter("error", ResourceWarning)
-            B, Yhat, disp_out, _, resid = self._run_per_pert(n, p, a, mem_limit_gb=large_limit)
-
-        Yhat_0, Yhat_1 = Yhat
-        assert Yhat_0.dtype == np.float64
-        assert Yhat_1.dtype == np.float64
+            _, Yhat, _, _, _ = self._run(100, 60, 3, mem_limit_gb=1e6)
+        assert Yhat[0].dtype == Yhat[1].dtype == np.float64
 
     def test_none_limit_stays_float64(self):
-        """mem_limit_gb=None (default) must not trigger float32 downcast."""
-        n, p, a = 100, 40, 3
-
         with warnings.catch_warnings():
             warnings.simplefilter("error", ResourceWarning)
-            B, Yhat, disp_out, _, resid = self._run_per_pert(n, p, a, mem_limit_gb=None)
-
-        Yhat_0, Yhat_1 = Yhat
-        assert Yhat_0.dtype == np.float64
-        assert Yhat_1.dtype == np.float64
+            _, Yhat, _, _, _ = self._run(100, 60, 3, mem_limit_gb=None)
+        assert Yhat[0].dtype == Yhat[1].dtype == np.float64
 
     def test_no_impute_no_warning(self):
-        """When impute=False mem_limit_gb has no effect and no warning fires."""
-        n, p, a = 100, 40, 3
-        tiny_limit = 0.0
-
         with warnings.catch_warnings():
             warnings.simplefilter("error", ResourceWarning)
-            B, Yhat, disp_out, _, resid = self._run_per_pert(
-                n, p, a, mem_limit_gb=tiny_limit, impute=False
-            )
+            _, Yhat, _, _, _ = self._run(100, 60, 3, mem_limit_gb=0.0, impute=False)
         assert isinstance(Yhat, np.ndarray)
+
+    def test_fit_glm_auto_honours_the_limit(self):
+        """The contract holds through the router, whichever solver it picks."""
+        n, p, a = 100, 60, 3
+        tiny_limit = n * p * a * 2 * 8 / 1e9 * 0.5
+
+        with pytest.warns(ResourceWarning, match="mem_limit_gb"):
+            _, Yhat, _, _, _ = self._run(
+                n, p, a, mem_limit_gb=tiny_limit, fit=gcate_glm.fit_glm_auto,
+            )
+        assert Yhat[0].dtype == Yhat[1].dtype == np.float32
 
 
 # ---------------------------------------------------------------------------
@@ -634,43 +518,4 @@ class TestMemoryLimitCrossFitting:
         assert len(df_res) == p * a
         assert estimation["Y_hat"].dtype == np.float32
 
-    def test_fit_glm_auto_propagates_mem_limit_gb(self):
-        """fit_glm_auto must forward mem_limit_gb to _fit_glm_fast_per_perturbation."""
-        if not gcate_glm._CRISPYX_AVAILABLE:
-            pytest.skip("crispyx not installed")
 
-        from causarray import nb_glm_fast as _nbgf
-
-        rng = np.random.default_rng(42)
-        n, p, a = 200, 200, 3
-        Y = rng.negative_binomial(3, 0.5, (n, p)).astype(np.float64)
-        X = np.ones((n, 1))
-        A = np.zeros((n, a))
-        per = n // (a + 1)
-        for k in range(a):
-            A[(k + 1) * per : (k + 2) * per, k] = 1
-        X_test = X.copy()
-
-        observed = {}
-        real = _nbgf._fit_glm_fast_per_perturbation
-
-        def _spy(*args, **kw):
-            observed['mem_limit_gb'] = kw.get('mem_limit_gb', 'MISSING')
-            return real(*args, **kw)
-
-        _nbgf._fit_glm_fast_per_perturbation = _spy
-        try:
-            tiny_limit = 0.123
-            gcate_glm.fit_glm_auto(
-                Y, X, A=A, family='nb',
-                impute=X_test,
-                mem_limit_gb=tiny_limit,
-            )
-        finally:
-            _nbgf._fit_glm_fast_per_perturbation = real
-
-        assert observed.get('mem_limit_gb') == tiny_limit, (
-            f"_fit_glm_fast_per_perturbation received "
-            f"mem_limit_gb={observed.get('mem_limit_gb')!r}; "
-            f"expected {tiny_limit!r}."
-        )

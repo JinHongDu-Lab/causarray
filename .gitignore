@@ -183,7 +183,7 @@ causarray/___*.py
 docs/source/tutorial/replogle/replogle_subset.h5ad
 docs/source/tutorial/replogle/replogle_subset_norm*.h5ad
 docs/source/tutorial/replogle/replogle_normed.h5ad
-docs/source/tutorial/replogle/replogle_results.h5
+docs/source/tutorial/replogle/replogle_results*.h5
 docs/source/tutorial/replogle/replogle_supt5h_go_*.csv
 docs/source/tutorial/replogle/replogle_propensity_batch12*
 
@@ -204,7 +204,6 @@ docs/source/tutorial/SCARF/scarf_investigation/
 docs/source/tutorial/*/validation_0.0.10/
 docs/source/tutorial/replogle/data/
 docs/source/tutorial/replogle/replogle_subset_lognorm_backup.h5ad
-docs/source/tutorial/replogle/replogle_results_0.0.10.h5
 docs/source/tutorial/replogle/run_batch_0.0.10.log
 docs/source/tutorial/replogle/run_batch_0.0.10.sh
 docs/source/tutorial/replogle/run_estimate_r_0.0.10.sh

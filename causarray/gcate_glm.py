@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
 
-from causarray.nb_glm_fast import fit_glm_fast, estimate_disp_fast
+from causarray.nb_glm_fast import fit_glm_fast, estimate_disp_fast, _resolve_offset
 
 # ---------------------------------------------------------------------------
 # Backend control flags
@@ -32,56 +32,33 @@ _USE_FAST_BACKEND: bool = True
 Note: not thread-safe; use _backend_override() for scoped switching.
 """
 
-_FAST_MAX_D: int = 50
-"""Maximum effective design width (d_eff) for the crispyx dense batch path.
+_FAST_MIN_P: int = 10
+"""Minimum number of genes for the batched crispyx path.
 
-Only designs *without* a block of one-hot treatment columns reach this path
-(those go to the structured solver, see ``_USE_ONEHOT_SOLVER``), so in
-practice it governs ``[covariates | latent factors]`` designs of width
-``1 + d_X + r``.  Benchmark 2026-09-21 (Replogle raw counts, n = 3,000,
-p = 8,563, NB, 17 statsmodels workers): crispyx was faster than the
-statsmodels pool at every width, 1.1x at d = 7, 2.1x at 35, 2.8x at 51,
-2.3x at 80, 2.1x at 130, 1.2x at 231, but its ``min_mu`` floor of 0.5 makes
-it inexact for genes below about one count per cell (median |dB| vs
-statsmodels 1e-3 on expressed genes, 0.1-0.2 on sparse ones).  The cap is kept
-at 50 because above it the structured solver is the right tool whenever the
-design has treatment indicators, and designs without them are never that wide.
-"""
-
-_USE_ONEHOT_SOLVER: bool = True
-"""Route designs ``[covariates | one-hot treatments]`` to the block-structured
-batched IRLS in :mod:`causarray.glm_onehot` when the one-hot block has at least
-``_ONEHOT_MIN_GROUPS`` columns.  Its cost is ``O(n p (d_X^2 + a))`` instead of
-the dense ``O(n p d^2)`` of the generic batch path, so wide screens (many
-perturbations per GCATE call) no longer fall back to gene-by-gene statsmodels.
-"""
-
-_ONEHOT_MIN_GROUPS: int = 2
-"""Minimum number of disjoint one-hot columns for the structured solver."""
-
-_USE_ONEHOT_FOR_IMPUTE: bool = True
-"""Use the structured solver for the counterfactual imputation path as well
-(``fit_glm_auto(..., A=A, impute=...)`` as called by :func:`LFC`).  It fits the
-joint model ``[W | A]`` once, the same model the statsmodels path fits gene by
-gene, and derives ``Y_hat`` for every treatment from the shared coefficients.
-
-Enabled 2026-09-21 after the LFC-level comparison on the Perturb-seq tutorial
-(29 perturbations, 2,926 cells, 3,221 genes): 10.7 s against 46.8 s for the
-statsmodels pool, tau correlation 0.9987, median |d tau| 2e-4, 7,460 of
-7,468 / 7,482 discoveries shared.  The crispyx per-perturbation path on the
-same data produced 1,049 coefficients above ``_FAST_MAX_COEF`` (its two-stage
-fit diverges for sparse genes) and therefore always fell back to statsmodels,
-so before this change the ``'fast'`` LFC outcome model cost 30 s of crispyx
-plus the full statsmodels run.  Set to False to restore the previous routing.
+Benchmarked 2026-09-22 on crispyx 0.1.5 (`plan/glm_benchmark/bench_min_p.py`,
+n = 1,000, 3 covariates, 3 treatments, NB): the batched path is faster at every
+gene count measured -- 533x at p = 5, 59x at p = 50, 2.9x at p = 500 -- because
+the statsmodels loop pays for a joblib pool before it fits anything, and it
+agrees with statsmodels to max |dB| 1e-5 with the dispersion supplied and 1e-2
+(median 3e-4) with it estimated.  So the old cap of 50, inherited from the
+crispyx 0.1.4 era, was not paying for itself.  What does not survive small p is
+the dispersion: crispyx's per-gene moments estimate sits within 5-12% of the
+gene-by-gene estimate down to p = 10 and is twice it at p = 5, where a call is
+too cheap for the routing to matter anyway.
 """
 
 _FAST_MAX_COEF: float = 1e4
-"""Maximum |coefficient| accepted from the crispyx fast path.
+"""Maximum |coefficient| accepted from the batched path; beyond it, statsmodels.
 
-Column preconditioning eliminates the ~5× blow-up observed before v0.0.6,
-so we keep only an extreme-magnitude trip-wire (default 1e4 — orders of
-magnitude beyond any legitimate latent-factor coefficient).  Fits exceeding
-this bound fall back to statsmodels.
+The bound has not fired on any realistic design since the structured solver
+arrived: measured 2026-09-22 (`plan/glm_benchmark/check_max_coef.py`) the
+largest |coefficient| is 17.6 on a sparse tail of genes at 0.002 counts per
+cell, 10.3 on latent-factor columns of standard deviation 0.009, 10.0 on an
+empty treatment arm (the group clip) and 1.7 on a singular design with a
+duplicated column, against a bound of 1e4.  That is expected -- crispyx clips
+the linear predictor and the group coefficients, and ridges the rest -- so what
+the guard really catches now is a non-finite fit.  It is kept because it costs
+one `np.max` and the statsmodels fallback regularises.
 """
 
 
@@ -210,13 +187,7 @@ def fit_glm(Y, X, A=None, family='gaussian', disp_family='poisson',
         X = np.c_[X,A]
         a = A.shape[1]
 
-    if offset is not None and offset is not False:
-        if type(offset)==bool and offset is True:
-            offsets = np.log(comp_size_factor(Y, **_filter_params(comp_size_factor, kwargs)))
-        else:
-            offsets = offset
-    else:
-        offsets = None
+    offsets = _resolve_offset(Y, offset, kwargs)
 
     # estimate dispersion parameter for negative binomial GLM if not provided
     if family=='nb' and disp_glm is None:
@@ -264,7 +235,9 @@ def fit_glm(Y, X, A=None, family='gaussian', disp_family='poisson',
                     X_test_copy[:, d+k] = 1
                     Yhat_1[:,k] = mod.predict(X_test_copy, offset=offsets)
             else:
-                Yhat_0[:,:] = Yhat_1[:,:] = mod.predict(X, offset=offsets).reshape(-1, a)
+                # One fitted mean per cell, broadcast across the treatment axis;
+                # reshape(-1, a) used to mis-shape it whenever a > 1.
+                Yhat_0[:,:] = Yhat_1[:,:] = mod.predict(X, offset=offsets)[:, None]
             
         except:
             pprint.pprint('Fitting GLM for column {} does not converge.'.format(j))
@@ -317,15 +290,8 @@ def fit_glm(Y, X, A=None, family='gaussian', disp_family='poisson',
 
 
 def estimate_disp(Y, X=None, A=None, Y_hat=None, disp_family='gaussian', offset=None, verbose=False, **kwargs):
-    if offset is not None:
-        if type(offset)==bool and offset is True:
-            offsets = np.log(comp_size_factor(Y, **_filter_params(comp_size_factor, kwargs)))
-        else:
-            offsets = offset
-        sf = np.exp(offsets)[:,None]
-    else:
-        offsets = None
-        sf = 1.
+    offsets = _resolve_offset(Y, offset, kwargs)
+    sf = 1. if offsets is None else np.exp(offsets)[:,None]
 
     if Y_hat is None:        
         if verbose:
@@ -410,117 +376,39 @@ def fit_glm_auto(Y, X, A=None, family='gaussian', disp_family='poisson',
     disp_glm=None, impute=False, offset=None, offset_test=None, shrinkage=False,
     alpha=1e-4, maxiter=1000, thres_disp=100., n_jobs=-3, random_state=0,
     verbose=False, mem_limit_gb=None, **kwargs):
-    """Fit GLM using crispyx's fast backend when available, falling back to statsmodels.
+    """Fit a GLM with crispyx's batched solvers, falling back to statsmodels.
 
-    Routing logic (evaluated in order):
+    Routing:
 
-    0. ``_USE_ONEHOT_SOLVER`` and ``X`` contains a block of at least
-       ``_ONEHOT_MIN_GROUPS`` disjoint one-hot columns (treatment indicators
-       appended to the covariates) and ``A is None`` → the block-structured
-       batched IRLS of :mod:`causarray.glm_onehot`, which is exact and costs
-       ``O(n p (d_X^2 + a))`` rather than ``O(n p d^2)``.  Added in 0.0.10 after
-       GCATE initialisations with 20-200 perturbations were found to spend
-       hours on paths 4-5.  Measured on Replogle raw counts (n = 3,000,
-       p = 8,563, NB): 5 s at d = 7, 14 s at d = 51, 20 s at d = 130 and
-       132 s at d = 231, against 11 / 53 / 264 / 902 s for crispyx and
-       9 / 154 / 548 / 1,090 s for 17-worker statsmodels, with median |dB|
-       vs statsmodels below 1e-5.
-       With ``_USE_ONEHOT_FOR_IMPUTE`` the same solver also serves the
-       counterfactual imputation path (``A`` given, ``impute`` set).
-    1. ``_USE_FAST_BACKEND is False``  → always use statsmodels.
-    2. ``_CRISPYX_AVAILABLE is False`` → crispyx not installed; use statsmodels.
-    3. ``family not in ('poisson', 'nb')`` → Gaussian; use statsmodels.
-    4. ``p < 50`` or ``d_eff > _FAST_MAX_D`` or throughput heuristic fails → use statsmodels.
-    5. crispyx path taken; if coefficients diverge → fall back to statsmodels.
+    1. ``backend='original'`` (``_USE_FAST_BACKEND is False``), crispyx not
+       installed, a Gaussian family, a ``shrinkage`` fit, or fewer than
+       ``_FAST_MIN_P`` genes -> the gene-by-gene statsmodels path
+       (:func:`fit_glm`).
+    2. Otherwise :func:`causarray.nb_glm_fast.fit_glm_fast`, which fits every
+       gene at once: crispyx's structured solver when the design carries a
+       block of one-hot treatment indicators (exact, and its cost does not
+       grow with the square of the number of treatments), its dense batch
+       fitter otherwise.
+    3. If those coefficients diverge, statsmodels as a last resort.
 
     Module-level knobs
     ------------------
     ``_USE_FAST_BACKEND`` : bool
         Master on/off switch.  Use ``_backend_override()`` for scoped changes.
-    ``_FAST_MAX_D`` : int
-        Maximum effective design width for the crispyx path (default 50).
+    ``_FAST_MIN_P`` : int
+        Minimum gene count for the batched path (default 10).
     ``_CRISPYX_AVAILABLE`` : bool
         Auto-detected at import time; set to False to simulate missing crispyx.
 
     Parameters and return values are identical to ``fit_glm``.
     """
-    if not _USE_FAST_BACKEND:
-        return fit_glm(
-            Y, X, A=A, family=family, disp_family=disp_family,
-            disp_glm=disp_glm, impute=impute, offset=offset, offset_test=offset_test,
-            shrinkage=shrinkage, alpha=alpha, maxiter=maxiter,
-            thres_disp=thres_disp, n_jobs=n_jobs,
-            random_state=random_state, verbose=verbose,
-            mem_limit_gb=mem_limit_gb, **kwargs,
-        )
-
-    n, p = Y.shape
-    # Designs with a block of disjoint one-hot columns (treatment indicators
-    # appended to the covariates, as GCATE's initialisation builds them) have a
-    # block-structured Hessian; the dedicated solver is exact and its cost does
-    # not grow with the square of the number of treatments.
-    if (_USE_ONEHOT_SOLVER and A is None and impute is False
-            and family in ('poisson', 'nb') and p >= 2):
-        from causarray.glm_onehot import detect_onehot_block, fit_glm_onehot
-        g_idx = detect_onehot_block(X, min_block=_ONEHOT_MIN_GROUPS)
-        if g_idx.size >= _ONEHOT_MIN_GROUPS:
-            x_idx = np.setdiff1d(np.arange(X.shape[1]), g_idx)
-            if offset is not None and offset is not False:
-                offsets = np.log(comp_size_factor(Y, **_filter_params(comp_size_factor, kwargs))) if offset is True else np.asarray(offset)
-            else:
-                offsets = None
-            if family == 'nb' and disp_glm is None:
-                disp_glm = estimate_disp_auto(Y, X, offset=offsets, disp_family=disp_family, **kwargs)
-            if verbose:
-                pprint.pprint(f'Fitting {family} GLM with the block-structured solver '
-                              f'({x_idx.size} covariates + {g_idx.size} one-hot groups)...')
-            B_o, Yhat, resid_deviance, _info = fit_glm_onehot(
-                Y, X[:, x_idx], X[:, g_idx], family=family, disp=disp_glm,
-                offset=offsets, max_iter=min(maxiter, 100))
-            B = np.empty((p, X.shape[1]))
-            B[:, x_idx] = B_o[:, :x_idx.size]
-            B[:, g_idx] = B_o[:, x_idx.size:]
-            return B, Yhat, disp_glm, offsets, resid_deviance
-    if (_USE_ONEHOT_FOR_IMPUTE and A is not None and impute is not False
-            and family in ('poisson', 'nb') and p >= 2):
-        A_arr = np.asarray(A, dtype=float)
-        if A_arr.ndim == 1:
-            A_arr = A_arr[:, None]
-        if np.all((A_arr == 0) | (A_arr == 1)) and np.all(A_arr.sum(axis=1) <= 1) and A_arr.shape[1] >= 1:
-            from causarray.glm_onehot import fit_glm_onehot
-            if offset is not None and offset is not False:
-                offsets = np.log(comp_size_factor(Y, **_filter_params(comp_size_factor, kwargs))) if offset is True else np.asarray(offset)
-            else:
-                offsets = np.zeros(n)
-            if family == 'nb' and disp_glm is None:
-                disp_glm = estimate_disp_auto(Y, X, A=A_arr, offset=offsets, disp_family=disp_family, **kwargs)
-            if verbose:
-                pprint.pprint(f'Fitting {family} GLM with the block-structured solver '
-                              f'({X.shape[1]} covariates + {A_arr.shape[1]} treatments), imputing counterfactuals...')
-            B_o, _, resid_deviance, _info = fit_glm_onehot(
-                Y, X, A_arr, family=family, disp=disp_glm, offset=offsets,
-                max_iter=min(maxiter, 100), return_mu=False)
-            d = X.shape[1]; a = A_arr.shape[1]
-            X_test = impute if isinstance(impute, np.ndarray) else X
-            off_test = offset_test if offset_test is not None else offsets
-            if X_test.shape[0] != off_test.shape[0]:
-                raise ValueError('offset_test must match the rows of the imputation design')
-            eta0 = off_test[:, None] + X_test @ B_o[:, :d].T                       # all treatments off
-            Yhat_0 = np.repeat(np.exp(np.clip(eta0, -30, 30))[:, :, None], a, axis=2)
-            Yhat_1 = np.exp(np.clip(eta0[:, :, None] + B_o[None, :, d:], -30, 30))  # treatment k on
-            B = B_o
-            return B, (Yhat_0, Yhat_1), disp_glm, offsets, resid_deviance
-    # When A is provided each perturbation is fit with a binary design of
-    # width d_cov+1, so d_eff stays small regardless of a.  When A is None
-    # the full X width drives crispyx's O(n*p*d²) einsum; for very wide X
-    # the per-gene statsmodels path is faster.
-    d_eff = X.shape[1] if A is None else X.shape[1] + 1  # effective per-model width
+    p = Y.shape[1]
     use_fast = (
-        _CRISPYX_AVAILABLE
+        _USE_FAST_BACKEND
+        and _CRISPYX_AVAILABLE
         and family in ('poisson', 'nb')
-        and p >= 50
-        and d_eff <= _FAST_MAX_D
-        and (n * p / d_eff ** 2) > 5_000  # throughput heuristic
+        and not shrinkage
+        and p >= _FAST_MIN_P
     )
     if use_fast:
         try:
@@ -535,30 +423,23 @@ def fit_glm_auto(Y, X, A=None, family='gaussian', disp_family='poisson',
         except ImportError:
             pass  # crispyx import failed at call time; fall through to statsmodels
         else:
-            # Sanity check: crispyx IRLS should produce finite, well-bounded
-            # coefficients.  Column preconditioning in _fit_glm_fast_single
-            # eliminates the ill-conditioning that previously caused ~5×
-            # coefficient blow-up vs statsmodels, so a tight 50/10 threshold
-            # would fire spuriously on latent-factor designs where unscaled
-            # coefs can legitimately be larger.  Keep only an extreme-
-            # magnitude trip-wire (`max|B| > _FAST_MAX_COEF`) so that
-            # pathological divergence (e.g. near-rank-deficient designs that
-            # slip past preconditioning) still falls back to statsmodels.
+            # Divergence trip-wire: crispyx clips the linear predictor, so a
+            # non-finite or absurd coefficient means the design was singular
+            # rather than that the gene is extreme.  Those calls go to
+            # statsmodels, which regularises as a last resort.
             B = result[0]
             finite_ok = bool(np.all(np.isfinite(B)))
             max_abs = float(np.max(np.abs(B))) if finite_ok else float('inf')
-            coef_ok = finite_ok and max_abs <= _FAST_MAX_COEF
-            if coef_ok:
+            if finite_ok and max_abs <= _FAST_MAX_COEF:
                 return result
             if verbose:
-                if not finite_ok:
-                    pprint.pprint('Fast GLM diverged (NaN/inf), falling back to statsmodels...')
-                else:
-                    pprint.pprint(
-                        f'Fast GLM coefficients exceed bound '
-                        f'(max|B|={max_abs:.2e} > {_FAST_MAX_COEF:.0e}); '
-                        f'falling back to statsmodels...'
-                    )
+                pprint.pprint(
+                    'Fast GLM diverged (NaN/inf), falling back to statsmodels...'
+                    if not finite_ok else
+                    f'Fast GLM coefficients exceed bound '
+                    f'(max|B|={max_abs:.2e} > {_FAST_MAX_COEF:.0e}); '
+                    f'falling back to statsmodels...'
+                )
     return fit_glm(
         Y, X, A=A, family=family, disp_family=disp_family,
         disp_glm=disp_glm, impute=impute, offset=offset, offset_test=offset_test,
@@ -569,52 +450,24 @@ def fit_glm_auto(Y, X, A=None, family='gaussian', disp_family='poisson',
     )
 
 
-def _moments_dispersion(Y, mu, d, alpha_min=1e-8, alpha_max=100.0):
-    """Method-of-moments NB size ``r = 1/alpha`` from Poisson fitted means.
-
-    ``alpha = sum((y - mu)^2 - mu) / sum(mu^2)`` per gene with a degrees-of-
-    freedom correction ``n / (n - d)``, clipped to ``[alpha_min, alpha_max]``.
-    Mirrors the ``'moments'`` estimate of the crispyx batch fitter.
-    """
-    n = Y.shape[0]
-    resid2 = ((Y - mu) ** 2 - mu).sum(axis=0) * (n / max(n - d, 1))
-    alpha = resid2 / np.maximum((mu ** 2).sum(axis=0), 1e-12)
-    alpha = np.clip(np.where(np.isfinite(alpha), alpha, 1.0), alpha_min, alpha_max)
-    return 1.0 / alpha
-
-
 def estimate_disp_auto(Y, X=None, A=None, Y_hat=None, disp_family='gaussian',
     offset=None, verbose=False, **kwargs):
-    """Estimate NB dispersion using crispyx when available, falling back to statsmodels.
+    """Batch NB dispersion estimate, or None when there is no cheap one.
 
-    Respects ``_USE_FAST_BACKEND`` and ``_CRISPYX_AVAILABLE`` flags.
-    Parameters and return values are identical to ``estimate_disp``.
+    Returns ``None`` when the crispyx path is unavailable (backend forced to
+    ``'original'``, crispyx not installed, or fewer than ``_FAST_MIN_P``
+    genes).  ``None`` means "no estimate supplied", which every caller
+    already handles by letting the fitter estimate the dispersion itself --
+    gene by gene in :func:`fit_glm`, or by method of moments inside crispyx.
+    Returning a pooled estimate here instead cost 0.15 of correlation with the
+    truth on the deconfounding benchmark (2026-09-22), because it replaced a
+    per-gene estimate with a worse one.
     """
-    p = Y.shape[1]
+    if not (_USE_FAST_BACKEND and _CRISPYX_AVAILABLE and Y.shape[1] >= _FAST_MIN_P):
+        return None
     X_disp = X if X is not None else np.ones((Y.shape[0], 1))
-    if A is not None:
-        X_disp = np.c_[X_disp, np.asarray(A)]
-    if _USE_ONEHOT_SOLVER and p >= 2:
-        # A design with a block of one-hot treatment columns (GCATE passes
-        # ``[X | A]`` here) would make the dense batch fitter's cost grow with
-        # the square of the number of treatments; the block-structured solver
-        # fits the same Poisson model at linear cost and the dispersion is then
-        # the method-of-moments estimate from its fitted means.
-        from causarray.glm_onehot import detect_onehot_block, fit_glm_onehot
-        g_idx = detect_onehot_block(X_disp, min_block=_ONEHOT_MIN_GROUPS)
-        if g_idx.size >= _ONEHOT_MIN_GROUPS:
-            x_idx = np.setdiff1d(np.arange(X_disp.shape[1]), g_idx)
-            _, mu, _, _ = fit_glm_onehot(Y, X_disp[:, x_idx], X_disp[:, g_idx], family='poisson',
-                                         offset=offset, max_iter=25)
-            return _moments_dispersion(np.asarray(Y, dtype=float), mu, X_disp.shape[1])
-    if _USE_FAST_BACKEND and _CRISPYX_AVAILABLE and p >= 50:
-        try:
-            return estimate_disp_fast(Y, X_disp, offset=offset, method='moments')
-        except ImportError:
-            pass  # crispyx import failed at call time; fall through
-    # statsmodels / least-squares path (small p, no one-hot block, or crispyx
-    # unavailable).  Previously this function returned None here, which the
-    # gene-by-gene ``fit_glm`` tolerated because it estimates the dispersion
-    # itself; the structured imputation path needs the estimate up front.
-    return estimate_disp(Y, X, A=A, Y_hat=Y_hat, disp_family=disp_family,
-                         offset=offset, verbose=verbose, **kwargs)
+    offsets = _resolve_offset(Y, offset, kwargs)
+    try:
+        return estimate_disp_fast(Y, X_disp, A=A, offset=offsets)
+    except ImportError:
+        return None

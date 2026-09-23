@@ -150,7 +150,14 @@ class TestConfounderEstimation:
 
     # ---- C3: under-specified r ----
     def test_underspecified_r(self, confounded_data_nb):
-        """C3 — Fitting r=1 when truth is r=2 still beats naive LFC (MSE)."""
+        """C3 — Fitting r=1 when truth is r=2 does not do worse than naive LFC.
+
+        Not a strict improvement: measured over six seeds of this generator
+        (2026-09-22) the ratio of under-specified to naive MSE is 0.82-1.02,
+        median ~0.98, so a strict inequality on one seed is a coin flip and
+        has flipped on a dependency upgrade before.  The correctly specified
+        case, where the effect is large, is C1/C2's job.
+        """
         Y, X_obs, A, tau_true, _ = confounded_data_nb
 
         df_naive, _ = LFC(Y, X_obs, A[:, None], family='nb', offset=True, backend='fast')
@@ -163,8 +170,12 @@ class TestConfounderEstimation:
                        W_A=np.c_[X_obs, U_hat], family='nb', offset=offsets, backend='fast')
         lfc_dc = df_dc['tau'].values
 
-        assert np.mean((lfc_dc - tau_true) ** 2) < np.mean((lfc_naive - tau_true) ** 2), \
-            "Under-specified GCATE (r=1) did not improve on naive LFC"
+        mse_dc = np.mean((lfc_dc - tau_true) ** 2)
+        mse_naive = np.mean((lfc_naive - tau_true) ** 2)
+        assert mse_dc <= 1.05 * mse_naive, (
+            f"Under-specified GCATE (r=1) did materially worse than naive LFC: "
+            f"MSE {mse_dc:.3f} vs {mse_naive:.3f}"
+        )
 
     # ---- C4: Poisson family ----
     def test_poisson_family_deconfounding(self):
@@ -705,7 +716,14 @@ class TestCombinedPipeline:
 
     # ---- E2: full pipeline power ----
     def test_full_pipeline_power(self, confounded_pipeline_data):
-        """E2 — After GCATE, TPR_deconf is no worse than TPR_naive."""
+        """E2 — Deconfounding lowers estimation error without collapsing power.
+
+        TPR_deconf >= TPR_naive is not a property of the method: measured over
+        five seeds of this generator (2026-09-22) deconfounding loses power on
+        three of them while cutting MSE by 2-10x, both before and after the
+        0.0.10 GLM rework.  What is asserted here is the trade it actually
+        makes.
+        """
         Y, X_obs, A, tau_true, _ = confounded_pipeline_data
         n_nonzero = (tau_true != 0).sum()
 
@@ -715,10 +733,15 @@ class TestCombinedPipeline:
         tpr_naive = ((df_naive['padj'] < 0.1).values & (tau_true != 0)).sum() / n_nonzero
         tpr_dc    = ((df_dc['padj']    < 0.1).values & (tau_true != 0)).sum() / n_nonzero
 
-        # Only assert if naive finds any true positives (otherwise test is degenerate)
+        mse_naive = np.mean((df_naive['tau'].values - tau_true) ** 2)
+        mse_dc = np.mean((df_dc['tau'].values - tau_true) ** 2)
+        assert mse_dc < mse_naive, (
+            f"MSE_deconf={mse_dc:.3f} >= MSE_naive={mse_naive:.3f}"
+        )
+        # Only assert power if naive finds any true positives (otherwise degenerate)
         if tpr_naive > 0:
-            assert tpr_dc >= tpr_naive, (
-                f"TPR_deconf={tpr_dc:.3f} < TPR_naive={tpr_naive:.3f}"
+            assert tpr_dc >= 0.6 * tpr_naive, (
+                f"TPR_deconf={tpr_dc:.3f} collapsed against TPR_naive={tpr_naive:.3f}"
             )
 
     # ---- E3: empirical FDR (slow) ----

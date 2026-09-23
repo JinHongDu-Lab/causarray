@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.10] - Unreleased
+## [0.0.10]
 
 Inference fix for small perturbation arms. Motivated by the SCARF mouse-brain
 Perturb-seq pilot (58 perturbations, 68-227 cells each), where 83% of the
@@ -8,8 +8,40 @@ discoveries were genes with zero counts in the perturbed arm and real effects
 were estimated but not called. See `plan/20260920_lfc_inference_fix_plan.md`
 and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
 
+Also the release in which the GLM engine moves out of causarray and into
+crispyx (>= 0.1.5 is now required). causarray had carried its own
+block-structured IRLS, a two-stage per-perturbation fitter and a design
+preconditioner because crispyx had none of them; it now has all three, so the
+duplicates and the routing that chose between them are gone -- about 1,000
+lines of package code. See `plan/20260922_glm_component_improvement_plan.md`.
+
 ### Changed
 
+- **crispyx >= 0.1.5 is required** (`setup.cfg`, `environment.yaml`).
+- `causarray/glm_onehot.py` is **removed**. The block-structured
+  `[covariates | one-hot treatments]` solver it held is
+  `crispyx.glm.StructuredGLMBatchFitter`, which causarray now calls directly.
+  The two implementations agreed to `max|dB|` 3.6e-8 (Poisson) and 1.5e-5
+  (NB) before the switch.
+- `fit_glm_fast` fits every design jointly: crispyx's structured solver when
+  the design carries a block of one-hot treatment indicators, its dense batch
+  fitter otherwise. The two-stage per-perturbation path
+  (`_fit_glm_fast_per_perturbation`, a global covariate model plus one
+  binary fit per perturbation) is removed; the joint fit is the same model the
+  statsmodels path fits, and agrees with it to 2e-5 on well-conditioned genes.
+- `fit_glm_auto`'s routing is one condition. `_FAST_MAX_D = 50`, the
+  `n * p / d_eff**2 > 5000` throughput heuristic and the `_USE_ONEHOT_SOLVER` /
+  `_USE_ONEHOT_FOR_IMPUTE` flags are gone; `_FAST_MIN_P = 50` (the gene count
+  below which the batch fitter's fixed costs do not pay) and the divergence
+  trip-wire `_FAST_MAX_COEF` remain. The width cap existed because crispyx
+  0.1.4 formed its per-gene Hessians with a three-operand `einsum`; 0.1.5 uses
+  BLAS, and a `d = 41` fit on `n = 2,000`, `p = 500` went from 103 s to 1.8 s.
+- Fitted means are no longer floored at `min_mu = 0.5`. That floor biased every
+  gene below about one count per cell (median |dB| against statsmodels 0.1-0.2
+  on the sparse tail) and had already been worked around with `min_mu = 1e-4`
+  in the imputation path. crispyx clips the linear predictor instead.
+- `causarray`'s design preconditioner (`_scale_design_columns`) is removed;
+  crispyx's batch fitter preconditions internally.
 - `LFC` uses the influence-function variance `var(eta)/n` of the estimator
   (`usevar='pooled'`) as its only variance estimator. `'unequal'` applied a
   two-sample Welch formula by arm to an estimator that averages over all
@@ -70,31 +102,33 @@ and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
 
 ### Performance
 
-- New block-structured batched IRLS (`causarray/glm_onehot.py`) for GLM designs
-  of the form `[covariates | one-hot treatments]`. The per-gene Hessian has a
-  diagonal treatment block, so each Newton step is solved through a Schur
-  complement at `O(n p (d_X^2 + a))` cost with BLAS matmuls and sparse group
-  sums, instead of the dense `O(n p d^2)` of the generic batch fitter. It is
-  the exact IRLS solution (matches statsmodels to 1e-5 on well-conditioned
-  genes) and needs no worker pool. `fit_glm_auto` routes such designs to it
-  automatically (`_USE_ONEHOT_SOLVER`, `_ONEHOT_MIN_GROUPS`), so GCATE
-  initialisations with many perturbations no longer fall back to gene-by-gene
-  statsmodels (Adamson's r = 30 refit took 7 h on that path; Replogle's
-  `estimate_r` with 200 treatment columns did not finish in 14 h).
+- GLM designs of the form `[covariates | one-hot treatments]` are fitted by
+  crispyx's block-structured solver (`StructuredGLMBatchFitter`). The per-gene
+  Hessian has a diagonal treatment block, so each Newton step is solved through
+  a Schur complement at `O(n p (d_X^2 + a))` cost instead of the dense
+  `O(n p d^2)`. It is the exact IRLS solution (matches statsmodels to 2e-5 on
+  well-conditioned genes) and needs no worker pool. `fit_glm_auto` routes such
+  designs to it automatically, so GCATE initialisations with many perturbations
+  no longer fall back to gene-by-gene statsmodels (Adamson's r = 30 refit took
+  7 h on that path; Replogle's `estimate_r` with 200 treatment columns did not
+  finish in 14 h). Measured at n = 3,000, p = 3,000, NB: 5.1 s with 10
+  treatments, 6.2 s with 50, 7.7 s with 200 -- flat in the number of
+  treatments.
 - NB dispersion pre-estimation (`estimate_disp_auto`) keeps the treatment
-  indicators in the model but fits them with the structured solver; the dense
+  indicators in the model but fits them with the batched solver; the dense
   batch fitter on `[X | A]` with 200 columns was the 11-hour single-core stage
   of `estimate_r` on Replogle. Dispersion is the method-of-moments estimate
   from the Poisson fitted means, as before.
 - `LFC`'s outcome model (`fit_glm_auto(..., A=A, impute=...)`) uses the
   structured solver on the joint model `[W | A]`, the same model the
-  statsmodels path fits gene by gene (`_USE_ONEHOT_FOR_IMPUTE`, default on).
+  statsmodels path fits gene by gene.
   On the Perturb-seq tutorial it takes 10.7 s against 46.8 s for the
   statsmodels pool, with tau correlation 0.9987, median |d tau| 2e-4 and 7,460
   of 7,468 / 7,482 discoveries shared. The crispyx per-perturbation fit on the
   same data returned 1,049 coefficients above the `_FAST_MAX_COEF` trip-wire
   and so had always fallen back to statsmodels, costing 30 s of crispyx plus
-  the full statsmodels run under `backend='fast'`.
+  the full statsmodels run under `backend='fast'`; that two-stage path has
+  since been removed.
 - The structured solver iterates only the genes that have not converged, so
   a few slow genes no longer cost full-matrix iterations (Replogle, n = 3,000,
   p = 8,563: 5 s at 7 columns, 14 s at 51, 20 s at 130, 132 s at 231, versus
@@ -117,10 +151,42 @@ and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
 
 ### Fixed
 
-- `estimate_disp_auto` returned `None` when neither the structured solver nor
-  crispyx applied (fewer than 50 genes, or no block of treatment indicators);
-  the gene-by-gene path masked this by estimating the dispersion itself. It
-  now falls back to `estimate_disp`, as its docstring always said.
+- `estimate_disp_auto` returns `None` again when no batched estimate is
+  available, as it did before 0.0.10's dispersion change, instead of a pooled
+  method-of-moments estimate. `None` means "no estimate supplied", which every
+  caller handles by letting the fitter estimate per gene. The pooled estimate
+  cost 0.15 of correlation with the truth on the deconfounding benchmark
+  (0.6179 -> 0.4640; naive 0.6188).
+- `estimate_disp` and `fit_glm` no longer raise `IndexError` on
+  `offset=False`; the three offset spellings (`None`, `False`, `True`, or an
+  array) are normalised in one place.
+- `fit_glm` with more than one treatment column and `impute=False` returned
+  all-zero coefficients: the fitted means were reshaped to `(-1, a)` instead
+  of being broadcast across the treatment axis, which raised inside the
+  per-gene `except` and silently produced zeros.
+- `mem_limit_gb` is honoured on every imputation route again (0.0.10's
+  structured branch bypassed the `float32` downcast).
+- `fit_glm_ondisk` returned all-`NaN` coefficients whenever a cell carried no
+  counts among the genes read: their size factor is zero, so the offset was
+  `-inf`. Such cells are now dropped with a warning, and `offset=True`
+  elsewhere raises a message naming the empty cells instead of propagating
+  `NaN` silently.
+
+### Tests
+
+- The on-disk tests read the in-repo Adamson tutorial subset (or
+  `CAUSARRAY_TEST_H5AD`) instead of a hard-coded path under one author's home
+  directory, and take the perturbation column and control label from the
+  file's `uns` rather than assuming them.
+- `tests/test_glm_onehot.py` becomes `tests/test_structured_glm.py` and tests
+  causarray's routing and conventions rather than a solver causarray no longer
+  owns; the engine-level tests (sparse/dense agreement, block detection) belong
+  to crispyx.
+- Two single-seed knife-edge assertions were rewritten around the claim that
+  actually holds: `test_underspecified_r` (deconfounded-to-naive MSE ratio
+  0.82-1.02 over six seeds) and `test_full_pipeline_power` (deconfounding cuts
+  MSE 2-10x while losing power on three seeds of five, before and after this
+  release).
 
 ### Deprecated
 

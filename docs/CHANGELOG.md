@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.11]
+
+### Added
+
+- `tune_penalty_factor` selects the per-treatment L2 penalty for one propensity
+  covariate, returning the mapping `refit_propensity_scores` consumes. It
+  triggers on treatments failing a support check and returns the smallest
+  factor meeting a target. Dropping the covariate is the infinite-penalty
+  limit, so the search evaluates that endpoint first and reports a treatment as
+  infeasible after one extra fit when the target is out of reach, instead of
+  exhausting a grid.
+- `gcate_lfc_batch(save_nuisances=True)` writes each batch's outcome-model
+  predictions beside the result cache as `<cache_path stem>.nuisances.h5`. The
+  outcome model does not depend on the propensity design, so those predictions
+  can be fed back to `LFC` as `Y_hat` to re-estimate under a different
+  propensity specification without refitting it. `Y_hat` has shape
+  `(n_cells, n_genes, n_treatments, 2)`, so budget roughly
+  `8 * n_cells * n_genes * n_treatments` bytes per batch.
+
 ## [0.0.10]
 
 Inference fix for small perturbation arms. Motivated by the SCARF mouse-brain

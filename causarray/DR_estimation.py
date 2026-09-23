@@ -204,6 +204,252 @@ def estimate_propensity_scores(
     return pi_hat
 
 
+def _arm_support_metrics(A, pi_hat, j, bins=40):
+    """Support metrics for one treatment column, matching
+    :func:`~causarray.diagnostics.summarize_propensity_scores`.
+
+    Scoring a single arm avoids summarizing every treatment on each candidate
+    penalty, which dominates the cost of a search.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    from causarray.diagnostics import _effective_sample_size
+
+    A = np.asarray(A, dtype=float)
+    ctrl = A.sum(axis=1) == 0
+    case = A[:, j] == 1
+    eligible = ctrl | case
+    y = case[eligible].astype(int)
+    p = np.asarray(pi_hat)[eligible, j]
+    p_ctrl, p_case = p[y == 0], p[y == 1]
+
+    h_ctrl, edges = np.histogram(p_ctrl, bins=bins, range=(0, 1))
+    h_case, _ = np.histogram(p_case, bins=edges)
+    h_ctrl = h_ctrl / h_ctrl.sum() if h_ctrl.sum() else h_ctrl
+    h_case = h_case / h_case.sum() if h_case.sum() else h_case
+    eps = np.finfo(float).eps
+    return {
+        'auc': float(roc_auc_score(y, p)) if 0 < y.sum() < len(y) else np.nan,
+        'overlap_ratio': float(np.minimum(h_ctrl, h_case).sum()),
+        'ess_treated_fraction': (
+            _effective_sample_size(1 / np.clip(p_case, eps, None)) / max(len(p_case), 1)),
+        'ess_control_fraction': (
+            _effective_sample_size(1 / np.clip(1 - p_ctrl, eps, None)) / max(len(p_ctrl), 1)),
+    }
+
+
+def _meets(metrics, target):
+    """True when every ``<metric>_lt`` / ``<metric>_gt`` condition holds.
+
+    The prefix must name a metric exactly, for example
+    ``ess_treated_fraction_lt``, not ``ess_treated_lt``.
+    """
+    for key, bound in target.items():
+        if key.endswith('_lt'):
+            name, op = key[:-3], 'lt'
+        elif key.endswith('_gt'):
+            name, op = key[:-3], 'gt'
+        else:
+            raise ValueError(f"condition {key!r} must end with '_lt' or '_gt'")
+        if name not in metrics:
+            raise ValueError(
+                f"condition {key!r} names no metric; available metrics are "
+                f"{sorted(metrics)}")
+        value = metrics[name]
+        if not np.isfinite(value):
+            return False
+        if op == 'lt' and not value < bound:
+            return False
+        if op == 'gt' and not value > bound:
+            return False
+    return True
+
+
+def tune_penalty_factor(
+    A, X_A, covariate, treatment_names=None, covariate_names=None,
+    trigger=None, target=None, bracket=(1.0, 1e4), tol=0.15,
+    on_infeasible='best',
+    K=1, ps_model='logistic', mask=None, random_state=0, verbose=False,
+    class_weight=None, **kwargs,
+):
+    """Choose a per-treatment L2 penalty for one propensity covariate.
+
+    Some perturbations shift a covariate so strongly that the propensity model
+    separates them from the controls, and their inverse-probability weights
+    collapse onto a few cells.  :func:`refit_propensity_scores` can penalize
+    that coefficient for selected treatments; this picks the factor.
+
+    For each triggered treatment the search is bracketed by two endpoints: the
+    unpenalized fit and the fit with the covariate dropped, which is the
+    infinite-penalty limit.  **If the dropped fit misses ``target``, no finite
+    penalty can reach it**, so the treatment is reported as infeasible after a
+    single fit instead of an exhausted search.  Otherwise the factor is found by
+    bisection on a log scale and the *smallest* qualifying value is returned, so
+    the covariate keeps as much of its adjustment role as the data support.
+
+    Target a monotone metric.  ``auc`` and ``overlap_ratio`` move monotonically
+    with the penalty; ``ess_treated_fraction`` does not, because an arm that is
+    completely separated has near-uniform weights and a deceptively high ESS
+    that *falls* as the penalty restores genuine overlap.
+
+    Penalizing a covariate is a soft version of dropping it, so the two are
+    endpoints of one continuum.  When the covariate is affected by treatment,
+    no factor makes that contrast identified; the choice trades a known bias
+    against precision and belongs in the analysis plan, not in this search.
+
+    Parameters
+    ----------
+    A : array-like, shape (n,) or (n, a)
+        Binary treatment indicators; all-zero rows are the shared controls.
+    X_A : array-like, shape (n, d_A)
+        Propensity covariates, including the intercept column.
+    covariate : str or int
+        The single covariate whose penalty is tuned.
+    treatment_names, covariate_names : sequence, optional
+        Labels for ``A`` columns and ``X_A`` columns.
+    trigger : mapping or None
+        Conditions selecting which treatments to tune, as ``{'auc_gt': 0.9,
+        'ess_treated_lt': 0.5}``.  A treatment is triggered when **any**
+        condition holds.  Defaults to ``{'auc_gt': 0.9}``.
+    target : mapping or None
+        Conditions a factor must satisfy, in the same form, combined with
+        **and**.  Defaults to ``{'auc_lt': 0.9}``.
+    bracket : tuple(float, float)
+        Smallest and largest factors considered.  The lower end is evaluated as
+        the unpenalized fit and the upper end as the dropped-covariate fit.
+    on_infeasible : {'best', 'none'}
+        What to do when the dropped-covariate endpoint already misses
+        ``target``, so no finite factor can reach it.  ``'best'`` (default)
+        applies the largest factor in ``bracket``, giving the arm the closest
+        support the covariate allows.  ``'none'`` leaves it unpenalized, which
+        keeps the arm at its worst-case weights -- the trigger has already said
+        its support is inadequate, so doing nothing is not a neutral choice.
+    tol : float
+        Bisection stops when the bracket spans less than ``tol`` in natural log
+        units.
+    K, ps_model, mask, random_state, verbose, class_weight, **kwargs
+        Passed to :func:`estimate_propensity_scores` for every candidate fit.
+
+    Returns
+    -------
+    penalty_factors_by_treatment : dict
+        ``{treatment: {covariate: factor}}`` for feasible triggered treatments,
+        ready to hand to :func:`refit_propensity_scores`.  Treatments that were
+        not triggered, or that are infeasible, are absent.
+    report : DataFrame
+        One row per triggered treatment with the chosen factor, whether the
+        target was feasible, the number of fits used, and the metrics
+        unpenalized, at the chosen factor, and with the covariate dropped.
+
+    Examples
+    --------
+    >>> factors, report = tune_penalty_factor(
+    ...     A, X_A, 'log_library_size', treatment_names=names,
+    ...     covariate_names=cov, target={'auc_lt': 0.9})  # doctest: +SKIP
+    >>> pi, _ = refit_propensity_scores(
+    ...     A, X_A, pi_hat=pi, treatment_names=names, covariate_names=cov,
+    ...     penalty_factors_by_treatment=factors)  # doctest: +SKIP
+    """
+    trigger = {'auc_gt': 0.9} if trigger is None else dict(trigger)
+    target = {'auc_lt': 0.9} if target is None else dict(target)
+    low, high = (float(b) for b in bracket)
+    if not 1.0 <= low < high:
+        raise ValueError('bracket must satisfy 1 <= low < high')
+    if tol <= 0:
+        raise ValueError('tol must be positive')
+
+    A_arr = np.asarray(A, dtype=float)
+    if A_arr.ndim == 1:
+        A_arr = A_arr[:, None]
+    if treatment_names is None:
+        treatment_names = (list(A.columns) if hasattr(A, 'columns')
+                           else list(range(A_arr.shape[1])))
+    treatment_names = list(treatment_names)
+    if covariate_names is None:
+        covariate_names = (list(X_A.columns) if hasattr(X_A, 'columns')
+                           else [f'covariate_{j + 1}' for j in range(np.shape(X_A)[1])])
+    covariate_names = list(covariate_names)
+    if covariate not in covariate_names:
+        if isinstance(covariate, (int, np.integer)) and 0 <= covariate < len(covariate_names):
+            covariate = covariate_names[covariate]
+        else:
+            raise ValueError(f'covariate {covariate!r} is not in covariate_names')
+
+    fit_kwargs = dict(K=K, ps_model=ps_model, mask=mask, clip=None,
+                      random_state=random_state, verbose=False,
+                      class_weight=class_weight, **kwargs)
+    pi_base = estimate_propensity_scores(A_arr, X_A, **fit_kwargs)
+
+    def scored(pi, j):
+        return _arm_support_metrics(A_arr, pi, j)
+
+    rows, factors = [], {}
+    for j, name in enumerate(treatment_names):
+        base = scored(pi_base, j)
+        if not any(_meets(base, {key: bound}) for key, bound in trigger.items()):
+            continue
+        n_fits = 1
+
+        # factor -> infinity is the covariate dropped; it bounds what any
+        # finite penalty can achieve.
+        pi_drop, _ = refit_propensity_scores(
+            A_arr, X_A, pi_hat=pi_base.copy(), treatment_names=treatment_names,
+            covariate_names=covariate_names, drop_by_treatment={name: [covariate]},
+            **fit_kwargs)
+        dropped = scored(pi_drop, j)
+        n_fits += 1
+
+        if not _meets(dropped, target):
+            if on_infeasible == 'best':
+                factors[name] = {covariate: high}
+                chosen_metrics, chosen_factor = dropped, high
+            elif on_infeasible == 'none':
+                chosen_metrics, chosen_factor = base, 1.0
+            else:
+                raise ValueError("on_infeasible must be 'best' or 'none'")
+            rows.append({'treatment': name, 'penalty_factor': chosen_factor,
+                         'feasible': False, 'n_fits': n_fits,
+                         **{f'{k}_unpenalized': v for k, v in base.items()},
+                         **{f'{k}_chosen': v for k, v in chosen_metrics.items()},
+                         **{f'{k}_dropped': v for k, v in dropped.items()}})
+            continue
+
+        def evaluate(factor):
+            pi_try, _ = refit_propensity_scores(
+                A_arr, X_A, pi_hat=pi_base.copy(), treatment_names=treatment_names,
+                covariate_names=covariate_names,
+                penalty_factors_by_treatment={name: {covariate: float(factor)}},
+                **fit_kwargs)
+            return scored(pi_try, j)
+
+        lo_log, hi_log = np.log(low), np.log(high)
+        best_factor, best = high, dropped
+        if _meets(base, target):
+            best_factor, best = low, base      # nothing to do beyond the trigger
+        else:
+            while hi_log - lo_log > tol:
+                mid_log = 0.5 * (lo_log + hi_log)
+                metrics = evaluate(np.exp(mid_log))
+                n_fits += 1
+                if _meets(metrics, target):
+                    hi_log, best_factor, best = mid_log, float(np.exp(mid_log)), metrics
+                else:
+                    lo_log = mid_log
+            factors[name] = {covariate: best_factor}
+
+        rows.append({'treatment': name, 'penalty_factor': best_factor, 'feasible': True,
+                     'n_fits': n_fits, **{f'{k}_unpenalized': v for k, v in base.items()},
+                     **{f'{k}_chosen': v for k, v in best.items()},
+                     **{f'{k}_dropped': v for k, v in dropped.items()}})
+
+    report = pd.DataFrame(rows)
+    if verbose and len(report):
+        print(f'[tune_penalty_factor] {len(report)} treatments triggered, '
+              f'{int(report.feasible.sum())} feasible, '
+              f'{report.n_fits.sum()} fits', flush=True)
+    return factors, report
+
+
 def refit_propensity_scores(
     A, X_A, drop_by_treatment=None, pi_hat=None, treatment_names=None,
     covariate_names=None, penalty_factors_by_treatment=None, K=1,

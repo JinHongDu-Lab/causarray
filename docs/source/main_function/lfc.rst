@@ -182,6 +182,52 @@ sensitivity analyses, distinguish pre-treatment covariates from possible
 post-treatment variables, and compare propensity overlap, effective sample
 sizes, and effect estimates before and after filtering.
 
+Choosing the penalty factor
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``tune_penalty_factor`` selects the factor for one covariate per treatment
+instead of fixing it by hand. It triggers on treatments failing a support
+check, then returns the **smallest** factor meeting a target, so the covariate
+keeps as much of its adjustment role as the data support::
+
+   factors, report = tune_penalty_factor(
+       A, W_A, 'log_library_size',
+       treatment_names=treatment_names, covariate_names=covariate_names,
+       trigger={'auc_gt': 0.9, 'ess_treated_fraction_lt': 0.5},
+       target={'auc_lt': 0.9},
+   )
+   pi_tuned, audit = refit_propensity_scores(
+       A, W_A, pi_hat=estimation['pi_hat_raw'],
+       treatment_names=treatment_names, covariate_names=covariate_names,
+       penalty_factors_by_treatment=factors,
+   )
+
+Dropping the covariate is the infinite-penalty limit, so it bounds what any
+finite factor can achieve. The search evaluates that endpoint first: when the
+dropped fit already misses the target, the treatment is reported with
+``feasible=False`` after a single extra fit rather than an exhausted search,
+and no penalty is applied. Otherwise the factor is found by bisection on a log
+scale, and ``tol`` trades fits against how tightly the smallest qualifying
+factor is resolved.
+
+Target a monotone metric. ``auc`` and ``overlap_ratio`` move monotonically with
+the penalty, so the endpoints bracket the search. ``ess_treated_fraction`` does
+not: a completely separated arm has near-uniform weights and a deceptively high
+ESS that *falls* as the penalty restores genuine overlap. Use ESS to trigger
+and to report, and a separation metric as the target.
+
+The returned ``report`` records, for every triggered treatment, the chosen
+factor, whether the target was feasible, the number of fits used, and the
+metrics unpenalized, at the chosen factor, and with the covariate dropped.
+Report the trigger, target and grid alongside the results: tuning a nuisance
+model against an overlap diagnostic is a specification choice, and choosing it
+to maximise overlap or discoveries would be tuning toward the answer.
+
+Penalizing and dropping are two points on one continuum. When a covariate is
+affected by treatment, no factor makes that contrast identified; the penalty
+only decides how much of a known bias to retain in exchange for precision. That
+belongs in the analysis plan rather than in the search.
+
 Filtering can go too far. If it leaves a constant design, the propensity model
 degenerates to a covariate-free constant and AIPW reduces to an unweighted
 contrast; ``refit_propensity_scores`` raises a ``RuntimeWarning`` and sets
@@ -224,7 +270,8 @@ an extreme discovery from an invalid estimate.
    :members:
 
 .. automodule:: causarray.DR_estimation
-   :members: estimate_propensity_scores, refit_propensity_scores
+   :members: estimate_propensity_scores, refit_propensity_scores,
+             tune_penalty_factor
 
 .. automodule:: causarray.diagnostics
    :members:

@@ -791,6 +791,73 @@ def VIM(eta_est, X, id_covs, **kwargs):
     return estimation
 
 
+def _nuisance_path_for(cache_path):
+    """Sibling file holding the nuisance store for ``cache_path``."""
+    if cache_path is None:
+        raise ValueError('save_nuisances=True requires cache_path')
+    base = str(cache_path)
+    stem = base[:-3] if base.endswith('.h5') else base
+    return f'{stem}.nuisances.h5'
+
+
+def _save_batch_nuisances(path, batch_i, estimation, cell_idx, pert_names,
+                          offset, U, gene_names):
+    """Persist one batch's outcome-model predictions for later re-estimation.
+
+    The outcome model is independent of the propensity design, so storing
+    ``Y_hat`` (with the batch's cells, latent factors and offset) is enough to
+    re-run :func:`LFC` under a different propensity specification without
+    refitting it.  ``Y_hat`` dominates the file: it is one float32 per cell and
+    gene in the batch, so budget roughly ``4 * n_cells * n_genes`` bytes per
+    batch before compression.
+
+    Parameters
+    ----------
+    path : str
+        HDF5 file to append to.
+    batch_i : int
+        Index of the batch, used as the group name.
+    estimation : dict
+        Second return value of :func:`LFC`, providing ``Y_hat`` and ``pi_hat``.
+    cell_idx : array
+        Row indices of this batch's cells in the full matrix.
+    pert_names : sequence
+        Perturbation columns fitted in this batch.
+    offset : array
+        Log size factors used by the batch fit.
+    U : array
+        Latent factors estimated for the batch.
+    gene_names : sequence or None
+        Column labels for ``Y_hat``.
+    """
+    import h5py
+
+    with h5py.File(path, 'a') as handle:
+        group_name = f'batch_{batch_i:04d}'
+        if group_name in handle:
+            del handle[group_name]
+        group = handle.create_group(group_name)
+        group.create_dataset(
+            'Y_hat', data=np.asarray(estimation['Y_hat'], dtype=np.float32),
+            compression='gzip', compression_opts=1,
+        )
+        group.create_dataset(
+            'pi_hat', data=np.asarray(estimation['pi_hat'], dtype=np.float32),
+            compression='gzip', compression_opts=1,
+        )
+        group.create_dataset('cell_idx', data=np.asarray(cell_idx, dtype=np.int64))
+        group.create_dataset('offset', data=np.asarray(offset, dtype=np.float64))
+        group.create_dataset('U', data=np.asarray(U, dtype=np.float64))
+        dt = h5py.special_dtype(vlen=str)
+        group.create_dataset('pert_names',
+                             data=np.asarray([str(n) for n in pert_names], dtype=object),
+                             dtype=dt)
+        if gene_names is not None:
+            group.create_dataset('gene_names',
+                                 data=np.asarray([str(g) for g in gene_names], dtype=object),
+                                 dtype=dt)
+
+
 def gcate_lfc_batch(
     Y, X, A, r,
     W_A=None,
@@ -802,6 +869,7 @@ def gcate_lfc_batch(
     offset=True,
     warm_start_U=False,
     cache_path=None,
+    save_nuisances=False,
     random_state=0,
     verbose=False,
     gcate_kwargs=None,
@@ -816,6 +884,19 @@ def gcate_lfc_batch(
     arrays (``res_1``, ``res_2``, ``Y_hat``, ``pi_hat``) are freed immediately
     after each batch so that peak memory is bounded by one batch's worth of
     data regardless of the total number of perturbations.
+
+    Pass ``save_nuisances=True`` (which requires ``cache_path``) to keep each
+    batch's outcome-model predictions before they are freed.  They are written
+    beside the result cache as ``<cache_path stem>.nuisances.h5``, kept in a
+    separate file because they are orders of magnitude larger and must not
+    disturb the ``/batch_*`` keys that drive resumption.  Because the outcome
+    model does not depend on the propensity design, those predictions can be
+    fed back to :func:`LFC` as ``Y_hat`` to re-estimate under different
+    propensity scores without refitting the outcome model, the expensive stage.
+    ``Y_hat`` holds counterfactual predictions with shape
+    ``(n_cells, n_genes, n_treatments, 2)``, so budget roughly
+    ``8 * n_cells * n_genes * n_treatments`` bytes per batch before
+    compression -- a few GB for a typical screen batch.
 
     Results can optionally be cached to an HDF5 file (``cache_path``) so that
     interrupted runs can be resumed without re-processing completed batches.
@@ -1047,6 +1128,12 @@ def gcate_lfc_batch(
                     })
                     store.put('/meta', _meta, format='fixed')
                 store.put(f'batch_{batch_i:04d}', df_b, format='fixed')
+
+        if save_nuisances:
+            _save_batch_nuisances(
+                _nuisance_path_for(cache_path), batch_i, estimation_b, cell_idx,
+                chunk_pert_names, offset_b, U_b, gene_names,
+            )
 
         del estimation_b   # releases Y_hat and pi_hat
         del U_b, Y_b, Y_b_np, X_b, A_b, W_b, W_A_b

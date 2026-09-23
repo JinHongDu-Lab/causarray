@@ -14,6 +14,7 @@ from unittest.mock import patch
 from causarray import (
     LFC,
     estimate_propensity_scores,
+    tune_penalty_factor,
     plot_propensity_scores,
     plot_treatment_associations,
     refit_propensity_scores,
@@ -533,3 +534,117 @@ def test_treatment_associations_support_per_treatment_bh():
 
     with pytest.raises(ValueError, match="bh_scope must be"):
         summarize_treatment_associations(A, Z, bh_scope='per_covariate')
+
+
+# ---------------------------------------------------------------------------
+# tune_penalty_factor
+# ---------------------------------------------------------------------------
+
+def _separating_design(n=400, seed=0):
+    """One arm separated by a single covariate, one arm overlapping."""
+    rng = np.random.default_rng(seed)
+    A = np.zeros((n, 2))
+    A[:40, 0] = 1        # separated arm
+    A[40:80, 1] = 1      # benign arm
+    ctrl = A.sum(axis=1) == 0
+    sep = rng.normal(0, 1, n)
+    sep[A[:, 0] == 1] += 6.0          # drives near-perfect separation
+    noise = rng.normal(0, 1, n)
+    X_A = np.column_stack([np.ones(n), sep, noise])
+    names = ['sep_arm', 'benign_arm']
+    cov = ['intercept', 'driver', 'noise']
+    return A, X_A, names, cov, ctrl
+
+
+def test_tune_penalty_factor_recovers_overlap_for_the_separated_arm():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['feasible']
+    assert row['auc_unpenalized'] > 0.9
+    assert row['auc_chosen'] < 0.9
+    assert factors['sep_arm']['driver'] > 1.0
+    # the benign arm is never triggered, so it gets no penalty
+    assert 'benign_arm' not in factors
+    assert 'benign_arm' not in report['treatment'].tolist()
+
+
+def test_tune_penalty_factor_leaves_untouched_arms_identical():
+    A, X_A, names, cov, _ = _separating_design()
+    base = estimate_propensity_scores(A, X_A, K=1, clip=None, random_state=0)
+    factors, _ = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, random_state=0)
+    updated, _ = refit_propensity_scores(
+        A, X_A, pi_hat=base.copy(), treatment_names=names, covariate_names=cov,
+        penalty_factors_by_treatment=factors, K=1, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    np.testing.assert_array_equal(base[:, j], updated[:, j])
+
+
+def test_tune_penalty_factor_reports_infeasible_without_searching():
+    """Dropping the covariate is the infinite-penalty limit, so a target the
+    dropped fit misses cannot be reached by any finite factor."""
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.0},   # unreachable
+        bracket=(1.0, 500.0), random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert not row['feasible']
+    assert row['n_fits'] == 2          # baseline + dropped endpoint only
+    # default on_infeasible='best' gives the arm the closest attainable support
+    assert row['penalty_factor'] == 500.0
+    assert factors['sep_arm']['driver'] == 500.0
+
+
+def test_tune_penalty_factor_infeasible_none_leaves_arm_unpenalized():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.0},
+        on_infeasible='none', random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert not row['feasible']
+    assert row['penalty_factor'] == 1.0
+    assert factors == {}
+    with pytest.raises(ValueError, match="on_infeasible"):
+        tune_penalty_factor(A, X_A, 'driver', treatment_names=names,
+                            covariate_names=cov, trigger={'auc_gt': 0.9},
+                            target={'auc_lt': 0.0}, on_infeasible='nope')
+
+
+def test_tune_penalty_factor_returns_no_penalty_when_target_already_met():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.5},        # triggers the benign arm too
+        target={'auc_lt': 1.01},        # already satisfied everywhere
+        random_state=0)
+    assert factors == {}
+    assert (report['penalty_factor'] == 1.0).all()
+
+
+def test_tune_penalty_factor_rejects_unknown_metric_and_covariate():
+    A, X_A, names, cov, _ = _separating_design()
+    with pytest.raises(ValueError, match='names no metric'):
+        tune_penalty_factor(A, X_A, 'driver', treatment_names=names,
+                            covariate_names=cov, target={'ess_treated_lt': 0.5})
+    with pytest.raises(ValueError, match='not in covariate_names'):
+        tune_penalty_factor(A, X_A, 'nope', treatment_names=names,
+                            covariate_names=cov)
+
+
+def test_tune_penalty_factor_tolerance_controls_fit_count():
+    A, X_A, names, cov, _ = _separating_design()
+    _, coarse = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, tol=1.5, random_state=0)
+    _, fine = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, tol=0.05, random_state=0)
+    assert coarse['n_fits'].sum() < fine['n_fits'].sum()
+    # a finer search cannot need a larger factor than a coarser one
+    assert fine['penalty_factor'].iloc[0] <= coarse['penalty_factor'].iloc[0] * 1.5

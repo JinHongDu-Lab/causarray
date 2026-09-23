@@ -38,7 +38,8 @@ from causarray.utils import (  # noqa: E402
 
 
 RAW_PATH = HERE / "replogle_subset.h5ad"
-R_PATH = HERE / "replogle-r.csv"
+R_PATH = (HERE / "replogle-r-0.0.10.csv" if (HERE / "replogle-r-0.0.10.csv").exists()
+          else HERE / "replogle-r.csv")  # the raw-count JIC table, as the notebook uses
 CACHE_PATH = HERE / "replogle_propensity_batch12.npz"
 BASELINE_PATH = HERE / "replogle_propensity_batch12_baseline.csv.gz"
 SUMMARY_PATH = HERE / "replogle_propensity_batch12_summary.csv"
@@ -206,7 +207,6 @@ def build_cache(force: bool = False):
         W_A,
         family="nb",
         offset=offset,
-        usevar="unequal",
     )
     print(f"Focal batch fit completed in {(time.perf_counter() - started) / 60:.1f} min")
 

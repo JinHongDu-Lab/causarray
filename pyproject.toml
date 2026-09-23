@@ -28,6 +28,7 @@ dependencies = [
     "joblib",
     "matplotlib",
     "sklearn_ensemble_cv",
+    "crispyx>=0.1.5",
 ]
 authors = [
   {name = "Jin-Hong Du", email = "jinhongd@hku.hk"},
@@ -55,6 +56,9 @@ classifiers = [
 ] 
 
 
+
+[project.optional-dependencies]
+test = ["pytest"]
 
 [tool.hatch.version]
 path = "causarray/__about__.py"

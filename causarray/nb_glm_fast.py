@@ -357,7 +357,7 @@ def fit_glm_fast(
             max_iter=min(maxiter, _MAX_IRLS_ITER), poisson_init_iter=5,
             dispersion_method="moments", min_mu=_MIN_MU,
         )
-        result = fitter.fit_batch(Y_float)
+        result = fitter.fit_batch(Y_float, fixed_dispersion=_to_alpha(disp_glm))
         B = result.coef
         eta = offset_arr[:, None] + X_cov @ B.T
         np.clip(eta, ETA_MIN, ETA_MAX, out=eta)
@@ -482,6 +482,7 @@ def fit_glm_ondisk(
         )
         Y = Y[keep]
         A_vec = A_vec[keep]
+        cell_indices = cell_indices[keep]
         n = int(keep.sum())
 
     offsets = np.log(comp_size_factor(Y))

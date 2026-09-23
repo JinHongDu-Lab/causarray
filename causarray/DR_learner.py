@@ -1,5 +1,6 @@
 import numpy as np
 import contextlib
+import inspect
 import pandas as pd
 import warnings
 from typing import Literal
@@ -256,6 +257,12 @@ def compute_causal_estimand(
     # normalize the influence function values
     etas /= size_factors[:,None,None,None]
 
+    # Preserve the public two-argument callback contract. Private inference
+    # metadata is only supplied when explicitly accepted or via **kwargs.
+    callback_params = inspect.signature(estimand).parameters
+    accepts_metadata = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in callback_params.values())
     res = []
     _count_control_shared = None
     _small_arm_floored = {}
@@ -278,11 +285,19 @@ def compute_causal_estimand(
             count_control = _count_control_shared
         else:
             count_control = Y[idx_control].sum(axis=0, dtype=np.float64)
-        _ret = estimand(etas[i_cells,:,j], A[i_cells,j],
-                        _n_params=W.shape[1] + 1, _in_sample=(K == 1),
-                        _obs_mean_treated=count_treated / max(idx_treated.size, 1),
-                        _obs_mean_control=count_control / max(idx_control.size, 1),
-                        **kwargs)
+        metadata = dict(
+            _n_params=W.shape[1] + 1, _in_sample=(K == 1),
+            _obs_mean_treated=count_treated / max(idx_treated.size, 1),
+            _obs_mean_control=count_control / max(idx_control.size, 1),
+            _size_factors=size_factors[i_cells],
+        )
+        if not accepts_metadata:
+            metadata = {key: value for key, value in metadata.items()
+                        if key in callback_params and callback_params[key].kind in
+                        (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                         inspect.Parameter.KEYWORD_ONLY)}
+        metadata.update(kwargs)
+        _ret = estimand(etas[i_cells,:,j], A[i_cells,j], **metadata)
         eta_est, tau_est, var_est = _ret[:3]
         df_est = _ret[3] if len(_ret) > 3 else None
         estimand_info = _ret[4] if len(_ret) > 4 else None
@@ -517,7 +532,9 @@ def LFC(
     logarithm of its floored mean ``max(mean, thres_diff)`` is then reported
     with a spuriously tiny standard error. A mean estimated from ``n_k`` cells
     cannot be more precise than Poisson sampling allows, so the variance of
-    the log-ratio is bounded below by ``1/(n₁ τ₁) + 1/(n₀ τ₀)`` and
+    the log-ratio uses the working Poisson floor
+    ``mean(1/s₁)/(n₁ τ₁) + mean(1/s₀)/(n₀ τ₀)``, where ``s_k`` are
+    the size factors in arm ``k`` (one without offsets), and
     ``var_est = max(var_est, floor)`` is used. With 100 perturbed cells and a
     floored mean of 0.01 this gives a standard error of at least 1, so a
     chance all-zero arm of a sparse gene is not called, while a genuine
@@ -609,13 +626,15 @@ def LFC(
         # reference for large n.
         df_eff = np.full(var_est.shape, float(df_resid))
 
-        # Model-based lower bound on the log-scale variance (see Notes): a
-        # mean estimated from n_k cells is at least Poisson-noisy, so
-        # Var(log tau_k) >= 1 / (n_k * tau_k).  This is what prevents an
-        # all-zero arm (empirical variance 0) from being called.
+        # Under the working Poisson model Y_i ~ Poisson(s_i * tau_k),
+        # Var(Y_i / s_i) = tau_k / s_i. The unweighted arm mean thus has
+        # log-scale variance sum(1 / s_i) / (n_k**2 * tau_k).
+        sf = kwargs.get('_size_factors', np.ones(n_cells))
+        inv_sf_1 = np.sum(1.0 / sf[A == 1]) / max(n_1, 1)**2
+        inv_sf_0 = np.sum(1.0 / sf[A == 0]) / max(n_0, 1)**2
         with np.errstate(invalid='ignore', divide='ignore'):
             std_raw = np.sqrt(var_est)
-            var_floor = 1.0 / (max(n_1, 1) * tau_1) + 1.0 / (max(n_0, 1) * tau_0)
+            var_floor = inv_sf_1 / tau_1 + inv_sf_0 / tau_0
             var_floored = np.asarray(var_est < var_floor) & estimable
             var_est = np.where(var_floored, var_floor, var_est)
 

@@ -1,5 +1,6 @@
 import numpy as np
 import contextlib
+import os
 import inspect
 import pandas as pd
 import warnings
@@ -799,6 +800,52 @@ def VIM(eta_est, X, id_covs, **kwargs):
     return estimation
 
 
+NUISANCE_WARN_BYTES = 10 * 1024 ** 3
+
+
+def _nuisance_store_bytes(batch_results, n_genes):
+    """Uncompressed bytes ``save_nuisances`` will write.
+
+    ``Y_hat`` dominates the store and has shape
+    ``(n_cells, n_genes, n_treatments, 2)`` in float32, so each batch costs
+    ``8 * n_cells * n_genes * n_treatments`` bytes.
+    """
+    return sum(
+        8 * len(br['cell_idx']) * int(n_genes) * len(br['pert_names'])
+        for br in batch_results if not br.get('skipped')
+    )
+
+
+def _warn_nuisance_store_size(batch_results, n_genes, path, verbose=False):
+    """Report the nuisance store's size, and warn when it is large.
+
+    The store is written batch by batch, so an unexpected size is otherwise
+    discovered only once the disk is full.
+    """
+    import shutil
+
+    total = _nuisance_store_bytes(batch_results, n_genes)
+    if verbose:
+        print(f'[gcate_lfc_batch] nuisance store -> {path} '
+              f'(~{total / 1e9:.1f} GB before compression)', flush=True)
+    if total <= NUISANCE_WARN_BYTES:
+        return total
+    try:
+        free = shutil.disk_usage(os.path.dirname(os.path.abspath(path)) or '.').free
+    except OSError:
+        free = None
+    message = (
+        f'save_nuisances will write about {total / 1e9:.1f} GB to {path!r} '
+        f'before compression: Y_hat is (n_cells, n_genes, n_treatments, 2) per '
+        f'batch, so it grows with the number of treatments as well as the data. '
+        f'Pass save_nuisances=False unless the propensity design will be retuned.'
+    )
+    if free is not None:
+        message += f' Free space on that volume is {free / 1e9:.1f} GB.'
+    warnings.warn(message, ResourceWarning, stacklevel=3)
+    return total
+
+
 def _nuisance_path_for(cache_path):
     """Sibling file holding the nuisance store for ``cache_path``."""
     if cache_path is None:
@@ -905,7 +952,12 @@ def gcate_lfc_batch(
     ``Y_hat`` holds counterfactual predictions with shape
     ``(n_cells, n_genes, n_treatments, 2)``, so budget roughly
     ``8 * n_cells * n_genes * n_treatments`` bytes per batch before
-    compression -- a few GB for a typical screen batch.
+    compression -- a few GB for a typical screen batch, and far more for a
+    screen with many treatments per batch.  The size is estimated once before
+    the first write: ``verbose=True`` reports it, and a store above
+    ``NUISANCE_WARN_BYTES`` raises a ``ResourceWarning`` naming the total and
+    the free space, so an unexpected size is not discovered only when the disk
+    fills.
 
     Results can optionally be cached to an HDF5 file (``cache_path``) so that
     interrupted runs can be resumed without re-processing completed batches.
@@ -1096,6 +1148,11 @@ def gcate_lfc_batch(
         pert_col_map = {name: i for i, name in enumerate(pert_names_all)}
     else:
         pert_col_map = {i: i for i in range(A_np.shape[1])}
+
+    if save_nuisances:
+        _warn_nuisance_store_size(
+            batch_results, Y_np.shape[1], _nuisance_path_for(cache_path),
+            verbose=verbose)
 
     new_dfs = {}
     for batch_i, br in enumerate(batch_results):

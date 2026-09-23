@@ -450,6 +450,32 @@ def test_lfc_batch_save_nuisances(small_data, tmp_path):
     np.testing.assert_allclose(merged['tau'], merged['tau_reused'], rtol=1e-5, atol=1e-7)
 
 
+def test_nuisance_store_bytes_counts_every_axis():
+    """Y_hat is (n_cells, n_genes, n_treatments, 2) in float32."""
+    from causarray.DR_learner import _nuisance_store_bytes
+
+    batches = [{'cell_idx': list(range(100)), 'pert_names': list(range(3))},
+               {'cell_idx': list(range(50)), 'pert_names': list(range(2))}]
+    assert _nuisance_store_bytes(batches, 10) == 8 * (100 * 10 * 3 + 50 * 10 * 2)
+    batches[1]['skipped'] = True          # a skipped batch writes nothing
+    assert _nuisance_store_bytes(batches, 10) == 8 * 100 * 10 * 3
+
+
+def test_warn_nuisance_store_size_only_for_large_stores(tmp_path, recwarn):
+    from causarray.DR_learner import NUISANCE_WARN_BYTES, _warn_nuisance_store_size
+
+    path = str(tmp_path / 'cache.nuisances.h5')
+    small = [{'cell_idx': list(range(10)), 'pert_names': [0]}]
+    _warn_nuisance_store_size(small, 10, path)
+    assert not [w for w in recwarn if issubclass(w.category, ResourceWarning)]
+
+    n_cells = int(NUISANCE_WARN_BYTES // (8 * 1000 * 2)) + 1000
+    large = [{'cell_idx': list(range(n_cells)), 'pert_names': [0, 1]}]
+    with pytest.warns(ResourceWarning, match='save_nuisances will write about'):
+        total = _warn_nuisance_store_size(large, 1000, path)
+    assert total > NUISANCE_WARN_BYTES
+
+
 def test_lfc_batch_save_nuisances_requires_cache_path(small_data, monkeypatch):
     """save_nuisances without cache_path is rejected before any fitting."""
     import causarray.gcate as gcate_mod

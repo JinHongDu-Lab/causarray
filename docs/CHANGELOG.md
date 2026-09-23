@@ -1,215 +1,73 @@
 # Changelog
 
-## [0.0.11]
-
-### Added
-
-- `tune_penalty_factor` selects the per-treatment L2 penalty for one propensity
-  covariate, returning the mapping `refit_propensity_scores` consumes. It
-  triggers on treatments failing a support check and returns the smallest
-  factor meeting a target. Dropping the covariate is the infinite-penalty
-  limit, so the search evaluates that endpoint first and reports a treatment as
-  infeasible after one extra fit when the target is out of reach, instead of
-  exhausting a grid.
-- `gcate_lfc_batch(save_nuisances=True)` writes each batch's outcome-model
-  predictions beside the result cache as `<cache_path stem>.nuisances.h5`. The
-  outcome model does not depend on the propensity design, so those predictions
-  can be fed back to `LFC` as `Y_hat` to re-estimate under a different
-  propensity specification without refitting it. `Y_hat` has shape
-  `(n_cells, n_genes, n_treatments, 2)`, so budget roughly
-  `8 * n_cells * n_genes * n_treatments` bytes per batch.
-
 ## [0.0.10]
 
-Inference fix for small perturbation arms. Motivated by the SCARF mouse-brain
-Perturb-seq pilot (58 perturbations, 68-227 cells each), where 83% of the
-discoveries were genes with zero counts in the perturbed arm and real effects
-were estimated but not called. See `plan/20260920_lfc_inference_fix_plan.md`
-and the "Investigation" section of `docs/source/tutorial/SCARF/SCARF-py.ipynb`.
-
-Also the release in which the GLM engine moves out of causarray and into
-crispyx (>= 0.1.5 is now required). causarray had carried its own
-block-structured IRLS, a two-stage per-perturbation fitter and a design
-preconditioner because crispyx had none of them; it now has all three, so the
-duplicates and the routing that chose between them are gone -- about 1,000
-lines of package code. See `plan/20260922_glm_component_improvement_plan.md`.
+Inference fix for small perturbation arms, and the GLM engine moves to crispyx
+(>= 0.1.5 now required).
 
 ### Changed
 
-- **crispyx >= 0.1.5 is required** (`setup.cfg`, `environment.yaml`).
-- `causarray/glm_onehot.py` is **removed**. The block-structured
-  `[covariates | one-hot treatments]` solver it held is
-  `crispyx.glm.StructuredGLMBatchFitter`, which causarray now calls directly.
-  The two implementations agreed to `max|dB|` 3.6e-8 (Poisson) and 1.5e-5
-  (NB) before the switch.
-- `fit_glm_fast` fits every design jointly: crispyx's structured solver when
-  the design carries a block of one-hot treatment indicators, its dense batch
-  fitter otherwise. The two-stage per-perturbation path
-  (`_fit_glm_fast_per_perturbation`, a global covariate model plus one
-  binary fit per perturbation) is removed; the joint fit is the same model the
-  statsmodels path fits, and agrees with it to 2e-5 on well-conditioned genes.
-- `fit_glm_auto`'s routing is one condition. `_FAST_MAX_D = 50`, the
-  `n * p / d_eff**2 > 5000` throughput heuristic and the `_USE_ONEHOT_SOLVER` /
-  `_USE_ONEHOT_FOR_IMPUTE` flags are gone; `_FAST_MIN_P = 50` (the gene count
-  below which the batch fitter's fixed costs do not pay) and the divergence
-  trip-wire `_FAST_MAX_COEF` remain. The width cap existed because crispyx
-  0.1.4 formed its per-gene Hessians with a three-operand `einsum`; 0.1.5 uses
-  BLAS, and a `d = 41` fit on `n = 2,000`, `p = 500` went from 103 s to 1.8 s.
-- Fitted means are no longer floored at `min_mu = 0.5`. That floor biased every
-  gene below about one count per cell (median |dB| against statsmodels 0.1-0.2
-  on the sparse tail) and had already been worked around with `min_mu = 1e-4`
-  in the imputation path. crispyx clips the linear predictor instead.
-- `causarray`'s design preconditioner (`_scale_design_columns`) is removed;
-  crispyx's batch fitter preconditions internally.
-- `LFC` uses the influence-function variance `var(eta)/n` of the estimator
-  (`usevar='pooled'`) as its only variance estimator. `'unequal'` applied a
-  two-sample Welch formula by arm to an estimator that averages over all
-  cells; for equal arms it is exactly twice the correct standard error and
-  for rare treatments far more. After validation on the Perturb-seq, SEA-AD
-  and Adamson tutorials (point estimates unchanged or moved toward the raw
-  log-ratio; permutation and fake-perturbation nulls calibrated) the Welch
-  path was removed; `usevar='unequal'` is accepted as an alias of `'pooled'`
-  with a `FutureWarning` for one release.
-- `LFC`, `compute_causal_estimand`, `cross_fitting`,
-  `estimate_propensity_scores` and `refit_propensity_scores` default to
-  calibrated propensity scores (`class_weight=None`). The former
-  `'balanced'` default centred scores near 0.5 regardless of prevalence,
-  shrinking the AIPW correction by roughly twice the prevalence and turning
-  the estimator into an outcome-model plug-in. `'balanced'` remains available.
-- `ps_clip` defaults to `'auto'`: per treatment,
-  `lower = min(0.01, prevalence/10)` and symmetrically for the upper bound.
-  The fixed `(0.01, 0.99)` clipped every calibrated score of a treatment with
-  prevalence below 1%. Resolved bounds are returned as
-  `estimation['ps_clip_bounds']`.
-- `LFC` default `thres_min` is `'auto'`: a gene is tested only if its larger
-  arm mean implies about `min_counts` (new argument, default 5) expected
-  counts in the smaller arm, i.e. `mean >= 5 / min(n0, n1)`. This equals the
-  former 0.01 at 500 cells, 0.05 at 100 cells, and 0.007 at 700 cells, so
-  small arms are protected without discarding testable genes in large arms
-  (a fixed 0.05 removed 43% of Adamson pairs). The test is applied to the
-  observed arm means as well as the counterfactual means, because the
-  outcome model's prediction for an all-zero arm can be inflated.
+- **crispyx >= 0.1.5 is required.** `causarray/glm_onehot.py`, the two-stage
+  per-perturbation fitter and the design preconditioner are removed in favour
+  of crispyx's `StructuredGLMBatchFitter` and dense batch fitter, which agree
+  with the statsmodels path to 2e-5 on well-conditioned genes.
+- `fit_glm_auto` routes on gene count only (`_FAST_MIN_P = 10`), with the
+  `_FAST_MAX_COEF` divergence check falling back to statsmodels.
+- Fitted means are no longer floored at `min_mu = 0.5`, which biased genes
+  below about one count per cell.
+- `LFC` uses the influence-function variance (`usevar='pooled'`) only; the
+  Welch `'unequal'` variance overstated standard errors.
+- Propensity scores default to calibrated probabilities
+  (`class_weight=None`); `'balanced'` remains available.
+- `ps_clip` defaults to `'auto'`, a prevalence-aware bound per treatment;
+  resolved bounds are returned as `estimation['ps_clip_bounds']`.
+- `LFC` default `thres_min='auto'` tests a gene only when about `min_counts`
+  (default 5) counts are expected in the smaller arm.
 
 ### Added
 
-- Model-based variance floor in `LFC`: the log-scale variance is bounded
-  below by `1/(n1*tau1) + 1/(n0*tau0)`, the Poisson lower bound for means
-  estimated from `n_k` cells. An arm whose cells all have zero counts has an
-  empirical influence-function variance of zero; the floor gives it a
-  standard error of at least ~1 for 100 cells, so chance all-zero arms of
-  sparse genes are no longer called while genuine complete knockouts remain
-  significant. The new `var_floored` column marks affected pairs. An arm
-  with no observed counts stays estimable at the floor (its AIPW mean is
-  exactly zero), so complete knockouts of expressed genes are reported
-  instead of being dropped as non-estimable.
-- Small-sample correction for in-sample nuisance fits (`K=1`): the pooled
-  variance is rescaled by `n/(n-d)` (`d` = outcome-model parameters) and
-  p-values use a t reference with `n-d` degrees of freedom. No-op for large
-  `n`; brings null t-statistics on 85-donor pseudo-bulk (SEA-AD) and
-  ~100-cell arms (Perturb-seq) from SD 1.08-1.10 to 1.0.
+- A Poisson variance floor `1/(n1*tau1) + 1/(n0*tau0)` in `LFC`, so chance
+  all-zero arms of sparse genes are not called while complete knockouts stay
+  significant (`var_floored` column).
+- Small-sample correction for `K=1`: variance scaled by `n/(n-d)` and a t
+  reference with `n-d` degrees of freedom.
 - Per-pair support columns `n_treated`, `n_control`, `count_treated`,
-  `count_control`, plus `var_floored` and the pre-floor `std_raw`, in every
-  `LFC` result frame.
-- A `RuntimeWarning` when a treatment has fewer than 200 cells in one arm and
-  the variance floor bound for some genes, and a `RuntimeWarning` when
-  `backend='fast'` is requested but `crispyx` is not importable (previously a
-  silent fall-back to gene-by-gene statsmodels).
-- `tests/test_small_arm_inference.py`: oracle-simulation SE calibration for
-  prevalence 0.5%-50%, chance all-zero arm not called, complete knockout
-  still called, type-I error for 100 vs 5,000 cells across 0.02-5 counts per
-  cell, class-weight invariance for balanced designs, prevalence-aware clip.
+  `count_control` and `std_raw` in every `LFC` result.
+- `RuntimeWarning`s for arms under 200 cells hitting the variance floor, and
+  for `backend='fast'` without crispyx.
+- `tune_penalty_factor` picks the smallest per-treatment L2 penalty on one
+  propensity covariate that meets a support target, checking the
+  dropped-covariate limit first to detect infeasible treatments.
+- `gcate_lfc_batch(save_nuisances=True)` saves each batch's outcome-model
+  predictions to `<cache_path stem>.nuisances.h5` for re-estimation under a
+  different propensity model; budget about
+  `8 * n_cells * n_genes * n_treatments` bytes per batch.
+- `estimate_r` accepts `backend` and returns a `time_s` column.
 
 ### Performance
 
-- GLM designs of the form `[covariates | one-hot treatments]` are fitted by
-  crispyx's block-structured solver (`StructuredGLMBatchFitter`). The per-gene
-  Hessian has a diagonal treatment block, so each Newton step is solved through
-  a Schur complement at `O(n p (d_X^2 + a))` cost instead of the dense
-  `O(n p d^2)`. It is the exact IRLS solution (matches statsmodels to 2e-5 on
-  well-conditioned genes) and needs no worker pool. `fit_glm_auto` routes such
-  designs to it automatically, so GCATE initialisations with many perturbations
-  no longer fall back to gene-by-gene statsmodels (Adamson's r = 30 refit took
-  7 h on that path; Replogle's `estimate_r` with 200 treatment columns did not
-  finish in 14 h). Measured at n = 3,000, p = 3,000, NB: 5.1 s with 10
-  treatments, 6.2 s with 50, 7.7 s with 200 -- flat in the number of
-  treatments.
-- NB dispersion pre-estimation (`estimate_disp_auto`) keeps the treatment
-  indicators in the model but fits them with the batched solver; the dense
-  batch fitter on `[X | A]` with 200 columns was the 11-hour single-core stage
-  of `estimate_r` on Replogle. Dispersion is the method-of-moments estimate
-  from the Poisson fitted means, as before.
-- `LFC`'s outcome model (`fit_glm_auto(..., A=A, impute=...)`) uses the
-  structured solver on the joint model `[W | A]`, the same model the
-  statsmodels path fits gene by gene.
-  On the Perturb-seq tutorial it takes 10.7 s against 46.8 s for the
-  statsmodels pool, with tau correlation 0.9987, median |d tau| 2e-4 and 7,460
-  of 7,468 / 7,482 discoveries shared. The crispyx per-perturbation fit on the
-  same data returned 1,049 coefficients above the `_FAST_MAX_COEF` trip-wire
-  and so had always fallen back to statsmodels, costing 30 s of crispyx plus
-  the full statsmodels run under `backend='fast'`; that two-stage path has
-  since been removed.
-- The structured solver iterates only the genes that have not converged, so
-  a few slow genes no longer cost full-matrix iterations (Replogle, n = 3,000,
-  p = 8,563: 5 s at 7 columns, 14 s at 51, 20 s at 130, 132 s at 231, versus
-  11 / 53 / 264 / 902 s for the dense batch fitter and 9 / 154 / 548 / 1,090 s
-  for statsmodels on 17 workers).
-- GCATE's alternating optimiser evaluates the objective and both gradients
-  with fused, parallel numba kernels (`nll_mat`, `grad_genes`, `grad_cells` in
-  `causarray/gcate_likelihood.py`). The previous whole-array expressions ran
-  on one core and allocated about ten `(n, p)` temporaries per call; they took
-  ~2 s of every ~2.3 s epoch on a 3,000 x 3,000 problem while the `prange` line
-  searches took 0.15 s. One update now takes 0.5 s on the same problem. The
-  kernels reduce in a fixed order, so results are bitwise identical for any
-  thread count; the reference kernels `nll` and `grad` are unchanged and still
-  used for the per-cell and per-gene line searches.
-- `estimate_r` fits the initial `[X | A]` GLM once and starts every candidate
-  `r` from the leading singular vectors of its deviance residuals (previously
-  the start passed for each `r` was dropped by `estimate`, so both
-  initialisation GLMs were refit per `r`). The returned table gains a `time_s`
-  column with the wall time per `r`.
+- Designs with one-hot treatment blocks are solved by a Schur complement,
+  flat in the number of treatments (n = p = 3,000: 5.1 s with 10 treatments,
+  7.7 s with 200).
+- GCATE's objective and gradients use parallel numba kernels with a fixed
+  reduction order (results independent of thread count); one update on a
+  3,000 x 3,000 problem drops from ~2.3 s to 0.5 s.
+- `estimate_r` fits the initial `[X | A]` GLM once for all candidate `r`.
 
 ### Fixed
 
-- `estimate_disp_auto` returns `None` again when no batched estimate is
-  available, as it did before 0.0.10's dispersion change, instead of a pooled
-  method-of-moments estimate. `None` means "no estimate supplied", which every
-  caller handles by letting the fitter estimate per gene. The pooled estimate
-  cost 0.15 of correlation with the truth on the deconfounding benchmark
-  (0.6179 -> 0.4640; naive 0.6188).
-- `estimate_disp` and `fit_glm` no longer raise `IndexError` on
-  `offset=False`; the three offset spellings (`None`, `False`, `True`, or an
-  array) are normalised in one place.
-- `fit_glm` with more than one treatment column and `impute=False` returned
-  all-zero coefficients: the fitted means were reshaped to `(-1, a)` instead
-  of being broadcast across the treatment axis, which raised inside the
-  per-gene `except` and silently produced zeros.
-- `mem_limit_gb` is honoured on every imputation route again (0.0.10's
-  structured branch bypassed the `float32` downcast).
-- `fit_glm_ondisk` returned all-`NaN` coefficients whenever a cell carried no
-  counts among the genes read: their size factor is zero, so the offset was
-  `-inf`. Such cells are now dropped with a warning, and `offset=True`
-  elsewhere raises a message naming the empty cells instead of propagating
-  `NaN` silently.
-
-### Tests
-
-- The on-disk tests read the in-repo Adamson tutorial subset (or
-  `CAUSARRAY_TEST_H5AD`) instead of a hard-coded path under one author's home
-  directory, and take the perturbation column and control label from the
-  file's `uns` rather than assuming them.
-- `tests/test_glm_onehot.py` becomes `tests/test_structured_glm.py` and tests
-  causarray's routing and conventions rather than a solver causarray no longer
-  owns; the engine-level tests (sparse/dense agreement, block detection) belong
-  to crispyx.
-- Two single-seed knife-edge assertions were rewritten around the claim that
-  actually holds: `test_underspecified_r` (deconfounded-to-naive MSE ratio
-  0.82-1.02 over six seeds) and `test_full_pipeline_power` (deconfounding cuts
-  MSE 2-10x while losing power on three seeds of five, before and after this
-  release).
+- NB dispersion falls back to the per-gene `estimate_disp` when no batched
+  estimate is available, instead of a fixed size of 1.
+- `estimate_disp` and `fit_glm` accept `offset=False`.
+- `fit_glm` with several treatments and `impute=False` returned zero
+  coefficients.
+- `mem_limit_gb` is honoured on every imputation route.
+- `fit_glm_ondisk` drops cells with no counts (with a warning) instead of
+  returning `NaN` coefficients.
 
 ### Deprecated
 
-- `LFC(usevar='unequal')` is an alias of `'pooled'` and warns (see above).
+- `LFC(usevar='unequal')` is an alias of `'pooled'` and warns.
 - `LFC(eps_var=...)` is ignored; the variance floor supersedes it.
 
 ## [0.0.9] - 2026-07-23

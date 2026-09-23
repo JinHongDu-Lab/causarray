@@ -85,3 +85,63 @@ def test_ondisk_filters_covariates_with_empty_selected_cells(tmp_path):
         offset=True, family="nb", maxiter=25)
     for value, reference in zip(actual, expected):
         np.testing.assert_allclose(value, reference)
+
+
+def test_ps_clip_accepts_per_treatment_bounds():
+    from causarray.DR_learner import _resolve_ps_clip
+
+    A = np.zeros((10, 3))
+    lower, upper = _resolve_ps_clip((np.full(3, .001), np.full(3, .999)), A)
+    np.testing.assert_array_equal(lower, np.full(3, .001))
+    np.testing.assert_array_equal(upper, np.full(3, .999))
+    with pytest.raises(ValueError, match='ps_clip'):
+        _resolve_ps_clip((np.array([.1, .5, .1]), np.array([.9, .4, .9])), A)
+
+
+def _nb_counts(n=120, p=6, seed=0):
+    rng = np.random.default_rng(seed)
+    X = np.c_[np.ones(n), rng.normal(size=n)]
+    A = (rng.random((n, 1)) < .3).astype(float)
+    mu = np.exp(1.5 + .3 * X[:, 1:2] + .2 * A)
+    Y = rng.negative_binomial(2, 2 / (2 + mu), size=(n, p)).astype(float)
+    Y[0] += 1
+    return Y, X, A
+
+
+@pytest.mark.parametrize('family', ['gaussian', 'NB'])
+def test_gcate_rejects_unknown_family(family):
+    from causarray.gcate import fit_gcate
+
+    Y, X, A = _nb_counts()
+    with pytest.raises(ValueError, match='family'):
+        fit_gcate(Y, X, A, 1, family=family)
+
+
+def test_nb_dispersion_is_estimated_without_batched_path():
+    """Below _FAST_MIN_P genes the per-gene estimate is used, not a size of 1."""
+    from causarray.gcate import _check_input
+
+    Y, X, A = _nb_counts()
+    _, kwargs_glm, _ = _check_input(Y, np.c_[X, A], 'nb', None, None, True, None)
+    disp = np.ravel(kwargs_glm['disp_glm'])
+    assert disp.shape == (Y.shape[1],)
+    assert 1.2 < np.median(disp) < 3.        # simulated NB size is 2
+
+
+def test_estimate_r_honours_backend(monkeypatch):
+    import causarray.gcate_glm as gcate_glm
+    from causarray.gcate import estimate_r
+
+    seen = []
+    original = gcate_glm.fit_glm_auto
+
+    def spy(*args, **kwargs):
+        seen.append(gcate_glm._USE_FAST_BACKEND)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gcate_glm, 'fit_glm_auto', spy)
+    Y, X, A = _nb_counts(p=12)
+    estimate_r(Y, X, A, [1], backend='original',
+               kwargs_es_1=dict(max_iters=1), kwargs_es_2=dict(max_iters=1))
+    assert seen and not any(seen)
+    assert gcate_glm._USE_FAST_BACKEND

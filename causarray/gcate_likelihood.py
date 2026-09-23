@@ -176,6 +176,8 @@ def nll_mat(Y, A, B, family, nuisance, Tys, thres_disp):
     si_t = 0 if Tys.shape[0] == 1 else 1
     sj_t = 0 if Tys.shape[1] == 1 else 1
     is_pois = family == 'poisson'
+    if not is_pois and family != 'nb':
+        raise ValueError('Family not recognized')
     hi = type_f(1e2)
     lo_p = type_f(1e-6)
     hi_p = type_f(1.) - type_f(1e-6)
@@ -239,6 +241,8 @@ def grad_genes(Y, A, B, family, nuisance, thres_disp):
     si_nu = 0 if nuisance.shape[0] == 1 else 1
     sj_nu = 0 if nuisance.shape[1] == 1 else 1
     is_pois = family == 'poisson'
+    if not is_pois and family != 'nb':
+        raise ValueError('Family not recognized')
     n_blocks = (p + _GENE_BLOCK - 1) // _GENE_BLOCK
     G = np.zeros((p, d), dtype=type_f)
     for blk in prange(n_blocks):
@@ -264,6 +268,8 @@ def grad_cells(Y, A, B, family, nuisance, thres_disp):
     si_nu = 0 if nuisance.shape[0] == 1 else 1
     sj_nu = 0 if nuisance.shape[1] == 1 else 1
     is_pois = family == 'poisson'
+    if not is_pois and family != 'nb':
+        raise ValueError('Family not recognized')
     G = np.zeros((n, d), dtype=type_f)
     for i in prange(n):
         for j in range(p):

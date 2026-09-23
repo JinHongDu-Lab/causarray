@@ -36,9 +36,17 @@ def _resolve_ps_clip(ps_clip, A, mask=None):
             lower[j] = min(0.01, prevalence / 10.0)
             upper[j] = 1.0 - min(0.01, (1.0 - prevalence) / 10.0)
         return lower, upper
-    if len(ps_clip) != 2 or not 0 <= ps_clip[0] < ps_clip[1] <= 1:
-        raise ValueError("ps_clip must be 'auto', None, or a pair 0 <= lower < upper <= 1")
-    return np.full(a, float(ps_clip[0])), np.full(a, float(ps_clip[1]))
+    message = "ps_clip must be 'auto', None, or a pair 0 <= lower < upper <= 1"
+    if len(ps_clip) != 2:
+        raise ValueError(message)
+    try:
+        lower = np.broadcast_to(np.asarray(ps_clip[0], dtype=float), (a,)).copy()
+        upper = np.broadcast_to(np.asarray(ps_clip[1], dtype=float), (a,)).copy()
+    except ValueError:
+        raise ValueError(message) from None
+    if not (np.all(0 <= lower) and np.all(lower < upper) and np.all(upper <= 1)):
+        raise ValueError(message)
+    return lower, upper
 
 
 def _add_log2fc_columns(df_res):
@@ -807,9 +815,10 @@ def _save_batch_nuisances(path, batch_i, estimation, cell_idx, pert_names,
     The outcome model is independent of the propensity design, so storing
     ``Y_hat`` (with the batch's cells, latent factors and offset) is enough to
     re-run :func:`LFC` under a different propensity specification without
-    refitting it.  ``Y_hat`` dominates the file: it is one float32 per cell and
-    gene in the batch, so budget roughly ``4 * n_cells * n_genes`` bytes per
-    batch before compression.
+    refitting it.  ``Y_hat`` dominates the file: it is stored as float32 with
+    shape ``(n_cells, n_genes, n_treatments, 2)``, so budget roughly
+    ``8 * n_cells * n_genes * n_treatments`` bytes per batch before
+    compression.
 
     Parameters
     ----------
@@ -988,6 +997,7 @@ def gcate_lfc_batch(
         gcate_kwargs = {}
     if lfc_kwargs is None:
         lfc_kwargs = {}
+    nuisance_path = _nuisance_path_for(cache_path) if save_nuisances else None
 
     import scipy.sparse as _sp
     from causarray.nb_glm_fast import _maybe_densify
@@ -1048,6 +1058,18 @@ def gcate_lfc_batch(
                             f"schemas — delete the cache file or pass a fresh "
                             f"cache_path to start over."
                         )
+        if nuisance_path is not None and skip_batches:
+            # A batch is complete only when its nuisances were saved too.
+            import h5py
+            try:
+                with h5py.File(nuisance_path, 'r') as handle:
+                    saved = {int(k.split('_')[1]) for k in handle.keys()
+                             if k.startswith('batch_')}
+            except (FileNotFoundError, OSError):
+                saved = set()
+            for idx in skip_batches - saved:
+                del cached_keys[idx]
+            skip_batches &= saved
         if verbose and skip_batches:
             print(f'[gcate_lfc_batch] Resuming: {len(skip_batches)} batches '
                   f'already cached in {cache_path!r}')
@@ -1117,6 +1139,14 @@ def gcate_lfc_batch(
         df_b['batch'] = batch_i
         new_dfs[batch_i] = df_b
 
+        # Nuisances first: a crash in between then leaves the batch uncached,
+        # so a resume refits it instead of skipping a batch with no nuisances.
+        if nuisance_path is not None:
+            _save_batch_nuisances(
+                nuisance_path, batch_i, estimation_b, cell_idx,
+                chunk_pert_names, offset_b, U_b, gene_names,
+            )
+
         if cache_path is not None:
             with pd.HDFStore(cache_path, mode='a') as store:
                 if '/meta' not in store.keys():
@@ -1128,12 +1158,6 @@ def gcate_lfc_batch(
                     })
                     store.put('/meta', _meta, format='fixed')
                 store.put(f'batch_{batch_i:04d}', df_b, format='fixed')
-
-        if save_nuisances:
-            _save_batch_nuisances(
-                _nuisance_path_for(cache_path), batch_i, estimation_b, cell_idx,
-                chunk_pert_names, offset_b, U_b, gene_names,
-            )
 
         del estimation_b   # releases Y_hat and pi_hat
         del U_b, Y_b, Y_b_np, X_b, A_b, W_b, W_A_b

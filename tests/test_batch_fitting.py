@@ -450,14 +450,39 @@ def test_lfc_batch_save_nuisances(small_data, tmp_path):
     np.testing.assert_allclose(merged['tau'], merged['tau_reused'], rtol=1e-5, atol=1e-7)
 
 
-def test_lfc_batch_save_nuisances_requires_cache_path(small_data):
-    """save_nuisances without cache_path is rejected rather than silently ignored."""
+def test_lfc_batch_save_nuisances_requires_cache_path(small_data, monkeypatch):
+    """save_nuisances without cache_path is rejected before any fitting."""
+    import causarray.gcate as gcate_mod
+
+    def fail(*args, **kwargs):
+        raise AssertionError('GCATE ran before the argument check')
+
+    monkeypatch.setattr(gcate_mod, 'fit_gcate_batch', fail)
     Y, X, A = small_data
     with pytest.raises(ValueError, match='requires cache_path'):
         gcate_lfc_batch(
             Y, X, A, r=2, batch_size=3, max_cells=200, n_ctrl=30,
             family='nb', gcate_kwargs=_GCATE_KW, save_nuisances=True,
         )
+
+
+def test_lfc_batch_resume_refits_batches_missing_nuisances(small_data, tmp_path):
+    """A cached batch without saved nuisances is refitted on resume."""
+    import h5py
+
+    from causarray.DR_learner import _nuisance_path_for
+
+    Y, X, A = small_data
+    cache = str(tmp_path / 'cache.h5')
+    kw = dict(r=2, batch_size=3, max_cells=200, n_ctrl=30, family='nb',
+              gcate_kwargs=_GCATE_KW, cache_path=cache)
+    df_first = gcate_lfc_batch(Y, X, A, **kw)
+    df_resumed = gcate_lfc_batch(Y, X, A, save_nuisances=True, **kw)
+
+    n_batches = int(np.ceil(A.shape[1] / 3))
+    with h5py.File(_nuisance_path_for(cache), 'r') as handle:
+        assert sorted(handle.keys()) == [f'batch_{i:04d}' for i in range(n_batches)]
+    np.testing.assert_allclose(df_first['tau'], df_resumed['tau'])
 
 
 def test_lfc_batch_deprecation_warning(small_data):

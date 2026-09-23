@@ -35,30 +35,15 @@ Note: not thread-safe; use _backend_override() for scoped switching.
 _FAST_MIN_P: int = 10
 """Minimum number of genes for the batched crispyx path.
 
-Benchmarked 2026-09-22 on crispyx 0.1.5 (`plan/glm_benchmark/bench_min_p.py`,
-n = 1,000, 3 covariates, 3 treatments, NB): the batched path is faster at every
-gene count measured -- 533x at p = 5, 59x at p = 50, 2.9x at p = 500 -- because
-the statsmodels loop pays for a joblib pool before it fits anything, and it
-agrees with statsmodels to max |dB| 1e-5 with the dispersion supplied and 1e-2
-(median 3e-4) with it estimated.  So the old cap of 50, inherited from the
-crispyx 0.1.4 era, was not paying for itself.  What does not survive small p is
-the dispersion: crispyx's per-gene moments estimate sits within 5-12% of the
-gene-by-gene estimate down to p = 10 and is twice it at p = 5, where a call is
-too cheap for the routing to matter anyway.
+The batched path is faster than statsmodels at every gene count; below 10
+genes its per-gene dispersion estimate becomes unreliable.
 """
 
 _FAST_MAX_COEF: float = 1e4
 """Maximum |coefficient| accepted from the batched path; beyond it, statsmodels.
 
-The bound has not fired on any realistic design since the structured solver
-arrived: measured 2026-09-22 (`plan/glm_benchmark/check_max_coef.py`) the
-largest |coefficient| is 17.6 on a sparse tail of genes at 0.002 counts per
-cell, 10.3 on latent-factor columns of standard deviation 0.009, 10.0 on an
-empty treatment arm (the group clip) and 1.7 on a singular design with a
-duplicated column, against a bound of 1e4.  That is expected -- crispyx clips
-the linear predictor and the group coefficients, and ridges the rest -- so what
-the guard really catches now is a non-finite fit.  It is kept because it costs
-one `np.max` and the statsmodels fallback regularises.
+crispyx clips the linear predictor, so in practice this catches non-finite
+fits; statsmodels then refits with regularisation.
 """
 
 
@@ -456,12 +441,7 @@ def estimate_disp_auto(Y, X=None, A=None, Y_hat=None, disp_family='gaussian',
 
     Returns ``None`` when the crispyx path is unavailable (backend forced to
     ``'original'``, crispyx not installed, or fewer than ``_FAST_MIN_P``
-    genes).  ``None`` means "no estimate supplied", which every caller
-    already handles by letting the fitter estimate the dispersion itself --
-    gene by gene in :func:`fit_glm`, or by method of moments inside crispyx.
-    Returning a pooled estimate here instead cost 0.15 of correlation with the
-    truth on the deconfounding benchmark (2026-09-22), because it replaced a
-    per-gene estimate with a worse one.
+    genes).  Callers then fall back to the per-gene :func:`estimate_disp`.
     """
     if not (_USE_FAST_BACKEND and _CRISPYX_AVAILABLE and Y.shape[1] >= _FAST_MIN_P):
         return None

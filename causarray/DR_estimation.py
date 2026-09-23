@@ -204,12 +204,13 @@ def estimate_propensity_scores(
     return pi_hat
 
 
-def _arm_support_metrics(A, pi_hat, j, bins=40):
+def _arm_support_metrics(A, pi_hat, j, bins=40, mask=None):
     """Support metrics for one treatment column, matching
     :func:`~causarray.diagnostics.summarize_propensity_scores`.
 
     Scoring a single arm avoids summarizing every treatment on each candidate
-    penalty, which dominates the cost of a search.
+    penalty, which dominates the cost of a search.  With ``mask``, only the
+    cells the propensity model was fitted on are scored.
     """
     from sklearn.metrics import roc_auc_score
 
@@ -219,6 +220,8 @@ def _arm_support_metrics(A, pi_hat, j, bins=40):
     ctrl = A.sum(axis=1) == 0
     case = A[:, j] == 1
     eligible = ctrl | case
+    if mask is not None:
+        eligible &= mask[:, j]
     y = case[eligible].astype(int)
     p = np.asarray(pi_hat)[eligible, j]
     p_ctrl, p_case = p[y == 0], p[y == 1]
@@ -309,7 +312,7 @@ def tune_penalty_factor(
         Labels for ``A`` columns and ``X_A`` columns.
     trigger : mapping or None
         Conditions selecting which treatments to tune, as ``{'auc_gt': 0.9,
-        'ess_treated_lt': 0.5}``.  A treatment is triggered when **any**
+        'ess_treated_fraction_lt': 0.5}``.  A treatment is triggered when **any**
         condition holds.  Defaults to ``{'auc_gt': 0.9}``.
     target : mapping or None
         Conditions a factor must satisfy, in the same form, combined with
@@ -335,10 +338,12 @@ def tune_penalty_factor(
     penalty_factors_by_treatment : dict
         ``{treatment: {covariate: factor}}`` for feasible triggered treatments,
         ready to hand to :func:`refit_propensity_scores`.  Treatments that were
-        not triggered, or that are infeasible, are absent.
+        not triggered, already met ``target`` unpenalized, or are infeasible
+        with ``on_infeasible='none'`` are absent.
     report : DataFrame
         One row per triggered treatment with the chosen factor, whether the
-        target was feasible, the number of fits used, and the metrics
+        target was feasible (``feasible``) and met at that factor
+        (``target_met``), the number of fits used, and the metrics
         unpenalized, at the chosen factor, and with the covariate dropped.
 
     Examples
@@ -375,13 +380,18 @@ def tune_penalty_factor(
         else:
             raise ValueError(f'covariate {covariate!r} is not in covariate_names')
 
+    mask_arr = None
+    if mask is not None:
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.ndim == 1:
+            mask_arr = mask_arr[:, None]
     fit_kwargs = dict(K=K, ps_model=ps_model, mask=mask, clip=None,
                       random_state=random_state, verbose=False,
                       class_weight=class_weight, **kwargs)
     pi_base = estimate_propensity_scores(A_arr, X_A, **fit_kwargs)
 
     def scored(pi, j):
-        return _arm_support_metrics(A_arr, pi, j)
+        return _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
 
     rows, factors = [], {}
     for j, name in enumerate(treatment_names):
@@ -389,6 +399,14 @@ def tune_penalty_factor(
         if not any(_meets(base, {key: bound}) for key, bound in trigger.items()):
             continue
         n_fits = 1
+
+        def evaluate(factor, name=name, j=j):
+            pi_try, _ = refit_propensity_scores(
+                A_arr, X_A, pi_hat=pi_base.copy(), treatment_names=treatment_names,
+                covariate_names=covariate_names,
+                penalty_factors_by_treatment={name: {covariate: float(factor)}},
+                **fit_kwargs)
+            return scored(pi_try, j)
 
         # factor -> infinity is the covariate dropped; it bounds what any
         # finite penalty can achieve.
@@ -398,48 +416,42 @@ def tune_penalty_factor(
             **fit_kwargs)
         dropped = scored(pi_drop, j)
         n_fits += 1
+        feasible = _meets(dropped, target)
 
-        if not _meets(dropped, target):
+        if not feasible:
             if on_infeasible == 'best':
+                chosen_factor, chosen = high, evaluate(high)
+                n_fits += 1
                 factors[name] = {covariate: high}
-                chosen_metrics, chosen_factor = dropped, high
             elif on_infeasible == 'none':
-                chosen_metrics, chosen_factor = base, 1.0
+                chosen_factor, chosen = 1.0, base
             else:
                 raise ValueError("on_infeasible must be 'best' or 'none'")
-            rows.append({'treatment': name, 'penalty_factor': chosen_factor,
-                         'feasible': False, 'n_fits': n_fits,
-                         **{f'{k}_unpenalized': v for k, v in base.items()},
-                         **{f'{k}_chosen': v for k, v in chosen_metrics.items()},
-                         **{f'{k}_dropped': v for k, v in dropped.items()}})
-            continue
-
-        def evaluate(factor):
-            pi_try, _ = refit_propensity_scores(
-                A_arr, X_A, pi_hat=pi_base.copy(), treatment_names=treatment_names,
-                covariate_names=covariate_names,
-                penalty_factors_by_treatment={name: {covariate: float(factor)}},
-                **fit_kwargs)
-            return scored(pi_try, j)
-
-        lo_log, hi_log = np.log(low), np.log(high)
-        best_factor, best = high, dropped
-        if _meets(base, target):
-            best_factor, best = low, base      # nothing to do beyond the trigger
+        elif _meets(base, target):
+            chosen_factor, chosen = low, base      # nothing to do beyond the trigger
         else:
+            lo_log, hi_log = np.log(low), np.log(high)
+            chosen_factor, chosen = None, None
             while hi_log - lo_log > tol:
                 mid_log = 0.5 * (lo_log + hi_log)
                 metrics = evaluate(np.exp(mid_log))
                 n_fits += 1
                 if _meets(metrics, target):
-                    hi_log, best_factor, best = mid_log, float(np.exp(mid_log)), metrics
+                    hi_log, chosen_factor, chosen = mid_log, float(np.exp(mid_log)), metrics
                 else:
                     lo_log = mid_log
-            factors[name] = {covariate: best_factor}
+            if chosen is None:
+                # No bisection point qualified; score the largest factor
+                # itself rather than borrowing the dropped fit's metrics.
+                chosen_factor, chosen = high, evaluate(high)
+                n_fits += 1
+            factors[name] = {covariate: chosen_factor}
 
-        rows.append({'treatment': name, 'penalty_factor': best_factor, 'feasible': True,
-                     'n_fits': n_fits, **{f'{k}_unpenalized': v for k, v in base.items()},
-                     **{f'{k}_chosen': v for k, v in best.items()},
+        rows.append({'treatment': name, 'penalty_factor': chosen_factor,
+                     'feasible': feasible, 'target_met': _meets(chosen, target),
+                     'n_fits': n_fits,
+                     **{f'{k}_unpenalized': v for k, v in base.items()},
+                     **{f'{k}_chosen': v for k, v in chosen.items()},
                      **{f'{k}_dropped': v for k, v in dropped.items()}})
 
     report = pd.DataFrame(rows)

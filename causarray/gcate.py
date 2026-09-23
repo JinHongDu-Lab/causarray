@@ -7,6 +7,8 @@ import causarray.gcate_glm as _gcate_glm  # module-qualified so _USE_FAST_BACKEN
 
 
 def _check_input(Y, X, family, disp_glm, disp_family, offset, c1, **kwargs):
+    if family not in ('nb', 'poisson'):
+        raise ValueError(f"family must be 'nb' or 'poisson', got {family!r}")
     if not (X.ndim == 2 and Y.ndim == 2):
         raise ValueError("Input must have ndim of 2. Y.ndim: {}, X.ndim: {}.".format(Y.ndim, X.ndim))
 
@@ -40,6 +42,10 @@ def _check_input(Y, X, family, disp_glm, disp_family, offset, c1, **kwargs):
             disp_family = 'poisson'
         if disp_glm is None:
             disp_glm = _gcate_glm.estimate_disp_auto(Y, X, offset=offset, disp_family=disp_family, maxiter=1000, **kwargs)
+        if disp_glm is None:
+            # No batched estimate; fall back to the per-gene one rather than
+            # the unit default below.
+            disp_glm = _gcate_glm.estimate_disp(Y, X, offset=offset, disp_family=disp_family, maxiter=1000, **kwargs)
     if disp_glm is not None:
         kwargs_glm['disp_glm'] = disp_glm
             
@@ -198,7 +204,7 @@ def estimate_r(Y, X, A, r_max, c=1.,
     family='nb', disp_glm=None, disp_family='poisson', offset=True,
     max_cells=None, random_state=0,
     kwargs_ls_1={}, kwargs_ls_2={}, kwargs_es_1={}, kwargs_es_2={},
-    **kwargs
+    backend: str = "auto", **kwargs
 ):
     """Estimate the number of latent factors for the GCATE model.
 
@@ -245,6 +251,9 @@ def estimate_r(Y, X, A, r_max, c=1.,
         Keyword arguments for the early stopper in the first stage.
     kwargs_es_2 : dict
         Keyword arguments for the early stopper in the second stage.
+    backend : str
+        GLM backend: ``"auto"`` (default), ``"fast"`` (force crispyx),
+        or ``"original"`` (force statsmodels).
 
     Returns
     -------
@@ -254,6 +263,16 @@ def estimate_r(Y, X, A, r_max, c=1.,
         shared initial GLM), sorted by ``r``.  The optimal ``r`` minimises the
         ``JIC`` column.
     """
+    ctx = _gcate_glm._backend_override(backend) if backend != "auto" else contextlib.nullcontext()
+    with ctx:
+        return _estimate_r(Y, X, A, r_max, c, family, disp_glm, disp_family, offset,
+            max_cells, random_state, kwargs_ls_1, kwargs_ls_2, kwargs_es_1, kwargs_es_2,
+            **kwargs)
+
+
+def _estimate_r(Y, X, A, r_max, c, family, disp_glm, disp_family, offset,
+    max_cells, random_state, kwargs_ls_1, kwargs_ls_2, kwargs_es_1, kwargs_es_2,
+    **kwargs):
     # ── Optional ctrl-priority subsampling ──────────────────────────────
     A_np = np.asarray(A) if not isinstance(A, pd.DataFrame) else A.values
     n_total = len(Y) if isinstance(Y, pd.DataFrame) else np.asarray(Y).shape[0]
@@ -517,8 +536,15 @@ def fit_gcate_batch(
             offset_ctrl = np.asarray(offset)[ctrl_sel]
         else:
             offset_ctrl = None
-        disp_glm = _gcate_glm.estimate_disp_auto(
-            Y_np[ctrl_sel], X_np[ctrl_sel], offset=offset_ctrl)
+        backend = kwargs.get('backend', 'auto')
+        ctx = _gcate_glm._backend_override(backend) if backend != "auto" else contextlib.nullcontext()
+        with ctx:
+            disp_glm = _gcate_glm.estimate_disp_auto(
+                Y_np[ctrl_sel], X_np[ctrl_sel], offset=offset_ctrl)
+            if disp_glm is None:
+                disp_glm = _gcate_glm.estimate_disp(
+                    Y_np[ctrl_sel], X_np[ctrl_sel], offset=offset_ctrl,
+                    disp_family=disp_family or 'poisson', maxiter=1000)
 
     import math
     if n_batches is None:

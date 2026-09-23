@@ -594,7 +594,8 @@ def test_tune_penalty_factor_reports_infeasible_without_searching():
         bracket=(1.0, 500.0), random_state=0)
     row = report.set_index('treatment').loc['sep_arm']
     assert not row['feasible']
-    assert row['n_fits'] == 2          # baseline + dropped endpoint only
+    assert not row['target_met']
+    assert row['n_fits'] == 3          # baseline, dropped endpoint, chosen factor
     # default on_infeasible='best' gives the arm the closest attainable support
     assert row['penalty_factor'] == 500.0
     assert factors['sep_arm']['driver'] == 500.0
@@ -648,3 +649,39 @@ def test_tune_penalty_factor_tolerance_controls_fit_count():
     assert coarse['n_fits'].sum() < fine['n_fits'].sum()
     # a finer search cannot need a larger factor than a coarser one
     assert fine['penalty_factor'].iloc[0] <= coarse['penalty_factor'].iloc[0] * 1.5
+
+
+def test_tune_penalty_factor_scores_the_factor_it_reports():
+    """When no finite factor in the bracket meets the target, the chosen
+    metrics come from that factor's fit, not the dropped-covariate fit."""
+    A, X_A, names, cov, _ = _separating_design()
+    _, probe = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 1.01}, random_state=0)
+    auc_dropped = probe.set_index('treatment').loc['sep_arm', 'auc_dropped']
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': auc_dropped + 1e-9},
+        bracket=(1.0, 2.0), random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['feasible']
+    assert not row['target_met']
+    assert row['penalty_factor'] == 2.0
+    assert row['auc_chosen'] > auc_dropped
+
+
+def test_tune_penalty_factor_scores_only_masked_cells():
+    A, X_A, names, cov, ctrl = _separating_design()
+    mask = np.ones(A.shape, dtype=bool)
+    mask[np.flatnonzero(ctrl)[:100], :] = False
+    _, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.0}, mask=mask, random_state=0)
+    pi = estimate_propensity_scores(A, X_A, mask=mask, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    keep = (ctrl | (A[:, j] == 1)) & mask[:, j]
+    from sklearn.metrics import roc_auc_score
+    expected = roc_auc_score(A[keep, j], pi[keep, j])
+    got = report.set_index('treatment').loc['benign_arm', 'auc_unpenalized']
+    assert got == pytest.approx(expected)
+

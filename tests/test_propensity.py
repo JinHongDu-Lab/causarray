@@ -29,7 +29,7 @@ def test_intercept_only_scores_respect_class_weight():
     A[60:80, 0] = 1
     A[80:100, 1] = 1
 
-    # Since 0.0.10 the default is calibrated; 'balanced' is the legacy option.
+    # Since 0.1.0 the default is calibrated; 'balanced' is the legacy option.
     calibrated = estimate_propensity_scores(A, np.ones((100, 1)))
     balanced = estimate_propensity_scores(
         A, np.ones((100, 1)), class_weight='balanced')

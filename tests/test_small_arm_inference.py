@@ -1,8 +1,8 @@
 """
-Stage 0 tests for the 0.0.10 inference fix (plan/20260920_lfc_inference_fix_plan.md).
+Stage 0 tests for the 0.1.0 inference fix.
 
 They pin the behaviour that the SCARF investigation showed was wrong before
-0.0.10:
+0.1.0:
 
 (a) the reported standard error matches the estimator's true sampling SD
     under an oracle outcome model, for rare and common treatments;

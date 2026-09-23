@@ -34,7 +34,7 @@ memory when loaded.
 Choosing the variance estimator
 -------------------------------
 
-Since 0.0.10 ``LFC`` uses ``usevar='pooled'``, the influence-function
+Since 0.1.0 ``LFC`` uses ``usevar='pooled'``, the influence-function
 (sandwich) variance ``var(eta)/n`` of the AIPW estimator, where ``eta`` are the
 per-cell influence values of the log-ratio and ``n`` counts every cell that
 enters the estimand. With calibrated propensity scores this equals the
@@ -61,7 +61,7 @@ Two further safeguards apply to every gene:
   significant while a genuine complete knockout (``tau`` of -5 or more) still
   is. The ``var_floored`` column marks affected pairs and ``std_raw`` reports
   the pre-floor standard error.
-* **Expression threshold.** ``thres_min='auto'`` (default since 0.0.10)
+* **Expression threshold.** ``thres_min='auto'`` (default since 0.1.0)
   requires about ``min_counts`` (5) expected counts in the smaller arm, i.e. a
   larger-arm mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a
   100-cell arm, 0.007 for a 700-cell arm. A fixed float can be passed
@@ -72,7 +72,7 @@ formula ``s0²/n0 + s1²/n1`` by arm. That is not the variance of an estimator
 that averages pseudo-outcomes over all cells: for equal arm sizes it is exactly
 twice the correct standard error, and for a rare treatment fitted with
 class-balanced propensity scores it is an order of magnitude too large, so
-real effects were estimated but not called. It was removed in 0.0.10 after
+real effects were estimated but not called. It was removed in 0.1.0 after
 re-validation on the Perturb-seq, SEA-AD and Adamson tutorials; the argument
 is accepted as an alias of ``'pooled'`` with a ``FutureWarning`` for one
 release. Neither estimator models within-donor correlation; repeated cells
@@ -88,7 +88,7 @@ overfitting diagnostics.  :func:`summarize_propensity_scores` reports overlap,
 tail mass, and inverse-weight effective sample size, while
 :func:`plot_propensity_scores` compares treatment and control distributions.
 
-Since 0.0.10 both the standalone estimator and ``LFC`` fit calibrated
+Since 0.1.0 both the standalone estimator and ``LFC`` fit calibrated
 logistic propensity scores by default (``class_weight=None``), which is what
 the AIPW weights ``A/pi`` require. The former ``'balanced'`` default centred
 the scores near 0.5 whatever the prevalence; for a treatment with 0.6%
@@ -102,7 +102,7 @@ scores (``K=5``) when judging overlap.
 Propensity scores used by AIPW are clipped with a prevalence-aware bound by
 default (``ps_clip='auto'``: ``lower = min(0.01, prevalence/10)`` per
 treatment, and symmetrically above). The fixed ``(0.01, 0.99)`` used before
-0.0.10 clipped every calibrated score of a treatment with prevalence below 1%.
+0.1.0 clipped every calibrated score of a treatment with prevalence below 1%.
 The resolved bounds are returned as ``estimation['ps_clip_bounds']`` and the
 raw scores as ``estimation['pi_hat_raw']``.
 
@@ -116,7 +116,7 @@ Small perturbation arms
 -----------------------
 
 Screens with fewer than ~200 cells per perturbation and thousands of shared
-controls are the regime in which the pre-0.0.10 defaults failed (SCARF
+controls are the regime in which the pre-0.1.0 defaults failed (SCARF
 tutorial, "Investigation" section): 83% of discoveries were genes with zero
 counts in the perturbed arm, and real effects had t-statistics halved by the
 Welch formula. In this regime inspect the ``count_treated`` and

@@ -1,5 +1,5 @@
 """Stage 3b: Replogle tutorial batched GCATE + LFC on the raw-count subset with
-the 0.0.10 defaults. ``r`` is the JIC choice from ``2_estimate_r.py``
+the 0.1.0 defaults. ``r`` is the JIC choice from ``2_estimate_r.py``
 (``results/replogle-r.csv``; r = 10 on the raw counts, 2026-09-21) unless given
 on the command line. Writes ``results/replogle_results_r{r}.h5`` (resumable
 cache); copy it to ``results/replogle_results.h5`` for the notebook."""
@@ -7,7 +7,7 @@ import sys, time
 sys.path.insert(0, '../../../..')
 import numpy as np, pandas as pd, scipy.sparse as sp, anndata as ad
 from causarray import prep_causarray_data, gcate_lfc_batch
-import causarray; assert causarray.__version__ == '0.0.10'
+import causarray; assert causarray.__version__ == '0.1.0'
 import os as _os
 for _d in ('results',):
     _os.makedirs(_d, exist_ok=True)

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.10]
+## [0.1.0]
 
 Inference fix for small perturbation arms, and the GLM engine moves to crispyx
 (>= 0.1.5 now required).

@@ -446,13 +446,13 @@ class TestLFCIntegration:
         fdr = (df['padj'] < 0.05).mean()
         assert fdr <= 0.10, f"Imbalanced type I error too high: FDR={fdr:.3f}"
 
-    # ---- I13: 'unequal' is a deprecated alias of 'pooled' (0.0.10) ----
+    # ---- I13: 'unequal' is a deprecated alias of 'pooled' (0.1.0) ----
     def test_unequal_is_alias_of_pooled(self, null_nb_imbalanced):
         """I13 — usevar='unequal' warns and returns exactly the pooled result."""
         Y, W, A, _, _ = null_nb_imbalanced
         df_pooled, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                            usevar='pooled', backend='fast')
-        with pytest.warns(FutureWarning, match="removed in 0.0.10"):
+        with pytest.warns(FutureWarning, match="removed in 0.1.0"):
             df_alias, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                               usevar='unequal', backend='fast')
         pd.testing.assert_frame_equal(df_alias, df_pooled)
@@ -721,7 +721,7 @@ class TestCombinedPipeline:
         TPR_deconf >= TPR_naive is not a property of the method: measured over
         five seeds of this generator (2026-09-22) deconfounding loses power on
         three of them while cutting MSE by 2-10x, both before and after the
-        0.0.10 GLM rework.  What is asserted here is the trade it actually
+        0.1.0 GLM rework.  What is asserted here is the trade it actually
         makes.
         """
         Y, X_obs, A, tau_true, _ = confounded_pipeline_data

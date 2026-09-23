@@ -55,7 +55,7 @@ class TestLFCOutputSchema:
     def test_nonpositive_arm_mean_with_observed_counts_is_nonestimable(self):
         # Control arm has observed counts but a negative AIPW mean (the
         # pseudo-outcome correction overshoots): that stays non-estimable.
-        # (Since 0.0.10 an arm with *no* observed counts is instead kept
+        # (Since 0.1.0 an arm with *no* observed counts is instead kept
         # estimable at the floor; see test_small_arm_inference.)
         # With calibrated scores the AIPW arm mean equals the observed arm
         # mean, so a negative value needs miscalibrated scores: pi = 0.5 for a

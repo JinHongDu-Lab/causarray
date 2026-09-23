@@ -73,10 +73,10 @@ def estimate_propensity_scores(
     ``K > 1``, every returned score is predicted by a model that did not train
     on that cell. Logistic models return calibrated treatment probabilities
     (``class_weight=None``) by default, matching :func:`LFC`. Pass
-    ``class_weight='balanced'`` to reproduce pre-0.0.10 fits, whose scores are
+    ``class_weight='balanced'`` to reproduce pre-0.1.0 fits, whose scores are
     centred near 0.5 regardless of prevalence.
 
-    .. versionchanged:: 0.0.10
+    .. versionchanged:: 0.1.0
         Default ``class_weight`` changed from ``'balanced'`` to ``None``.
 
     Parameters
@@ -100,7 +100,7 @@ def estimate_propensity_scores(
     class_weight : str, dict or None, optional
         Class weighting for logistic propensity estimation. ``None`` (default)
         gives calibrated probabilities and matches :func:`LFC`;
-        ``'balanced'`` reproduces the pre-0.0.10 behaviour.
+        ``'balanced'`` reproduces the pre-0.1.0 behaviour.
 
     Returns
     -------
@@ -532,7 +532,7 @@ def refit_propensity_scores(
     but drives ``score_std`` towards zero.
 
     .. versionadded:: 0.0.9
-    .. versionchanged:: 0.0.10
+    .. versionchanged:: 0.1.0
         Default ``class_weight`` changed from ``'balanced'`` to ``None`` to
         match :func:`estimate_propensity_scores` and :func:`LFC`.
     """
@@ -762,8 +762,8 @@ def cross_fitting(
         The propensity score model. The default is 'logistic'.
     ps_class_weight : str, dict or None, optional
         Class weighting used by the propensity model. ``None`` (default since
-        0.0.10) gives calibrated treatment probabilities; ``'balanced'``
-        reproduces the pre-0.0.10 nuisance fit.
+        0.1.0) gives calibrated treatment probabilities; ``'balanced'``
+        reproduces the pre-0.1.0 nuisance fit.
     
     Y_hat : array, optional
         Estimated potential outcome of shape (n, p, a, 2). The default is None.

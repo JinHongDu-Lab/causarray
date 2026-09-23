@@ -246,7 +246,8 @@ class TestOnDiskNBGLM:
 
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.environ.get('CAUSARRAY_TEST_H5AD') or os.path.join(
-            repo, 'docs', 'source', 'tutorial', 'adamson', 'adamson_subset.h5ad')
+            repo, 'docs', 'source', 'tutorial', 'adamson', 'data',
+            'adamson_subset.h5ad')
         if not os.path.exists(path):
             pytest.skip(f"{os.path.relpath(path, repo)} not found; "
                         "set CAUSARRAY_TEST_H5AD to another h5ad")

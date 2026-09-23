@@ -3,7 +3,7 @@ Preprocessing script for the SEA-AD case-control tutorial.
 
 Downloads excitatory-neuron data (MTG) from the CellxGene Census (SEA-AD collection),
 subsamples cells per donor, pseudo-bulks to donor level, and saves the result as
-`sea_ad_mtg_exneu_pb.h5ad` in the current directory.
+`data/sea_ad_mtg_exneu_pb.h5ad` in the current directory.
 
 Requirements
 ------------
@@ -11,7 +11,7 @@ Requirements
 
 Usage
 -----
-    python preprocess_sea_ad.py
+    python 1_preprocess_sea_ad.py
 """
 
 import re
@@ -42,7 +42,12 @@ OBS_COLS = ["donor_id", "sex", "disease", "self_reported_ethnicity",
 CENSUS_VERSION = "2025-11-08"
 MAX_CELLS_PER_DONOR = 300  # cap applied to the COMBINED set (matching the paper)
 RANDOM_SEED = 0
-OUT_FILE = "sea_ad_mtg_exneu_pb.h5ad"
+OUT_FILE = "data/sea_ad_mtg_exneu_pb.h5ad"
+
+import os as _os
+for _d in ("data", "results"):
+    _os.makedirs(_d, exist_ok=True)
+
 
 
 def _parse_age(dev_stage: str) -> float:

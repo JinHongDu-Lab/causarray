@@ -178,34 +178,19 @@ causarray/___*.py
 # committed documentation.
 /docs/source/tutorial/adamson/
 
-# Replogle tutorial: large data files (regenerate with prep_tutorial_data.py or
-# download from the project data repository; replogle_subset.h5ad is ~2 GB)
-docs/source/tutorial/replogle/replogle_subset.h5ad
-docs/source/tutorial/replogle/replogle_subset_norm*.h5ad
-docs/source/tutorial/replogle/replogle_normed.h5ad
-docs/source/tutorial/replogle/replogle_results*.h5
-docs/source/tutorial/replogle/replogle_supt5h_go_*.csv
-docs/source/tutorial/replogle/replogle_propensity_batch12*
+# Replogle tutorial: prepared inputs under data/ and everything generated
+# under results/ are local artifacts; rebuild with the numbered scripts
+# (data/replogle_subset.h5ad is ~2 GB).
+docs/source/tutorial/replogle/data/
+docs/source/tutorial/replogle/results/**
+# the two small JIC tables are committed so the notebook runs without a refit
+!docs/source/tutorial/replogle/results/replogle-r.csv
+!docs/source/tutorial/replogle/results/replogle-r-legacy.csv
 
 # Unrelated tutorial directory (not part of causarray package docs)
 docs/source/tutorial/scp/
 
-# SCARF tutorial: raw source data (multi-GB) and generated intermediates
-# (regenerate with prep_scarf_data.py + SCARF-py.ipynb). Only the notebook,
-# prep script, and the small cached scarf-r.csv are tracked.
-docs/source/tutorial/SCARF/*.h5ad
-docs/source/tutorial/SCARF/*.pptx
-docs/source/tutorial/SCARF/scarf-gcate-results.pkl
-docs/source/tutorial/SCARF/scarf-lfc.csv
-docs/source/tutorial/SCARF/scarf-ps.pdf
-docs/source/tutorial/SCARF/scarf-scatter-causarray-vs-wilcoxon.pdf
-docs/source/tutorial/SCARF/scarf_lfc_batches/
-docs/source/tutorial/SCARF/scarf_investigation/
-docs/source/tutorial/*/validation_0.0.10/
-docs/source/tutorial/replogle/data/
-docs/source/tutorial/replogle/replogle_subset_lognorm_backup.h5ad
-docs/source/tutorial/replogle/run_batch_0.0.10.log
-docs/source/tutorial/replogle/run_batch_0.0.10.sh
-docs/source/tutorial/replogle/run_estimate_r_0.0.10.sh
-docs/source/tutorial/replogle/run_estimate_r_0.0.10.log
-docs/source/tutorial/replogle/*_lognorm_backup.*
+# SCARF tutorial is currently a local analysis and is not part of the
+# committed documentation (it is absent from docs/source/index.rst).
+# Regenerate with the numbered scripts + SCARF-py.ipynb.
+/docs/source/tutorial/SCARF/

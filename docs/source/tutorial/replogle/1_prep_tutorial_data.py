@@ -8,7 +8,7 @@ Steps (all streaming, via ``crispyx``; the full matrix is never loaded):
 1. download the source file into ``data/`` (resumable; skipped if present),
 2. select the ``N_TOP_PERT`` most abundant perturbations plus ``N_CTRL``
    randomly chosen control cells from ``obs`` alone,
-3. stream the subset to ``replogle_subset.h5ad`` with
+3. stream the subset to ``data/replogle_subset.h5ad`` with
    :func:`crispyx.write_filtered_subset`,
 4. verify that ``X`` holds raw integer UMI counts. causarray fits
    negative-binomial GLMs, so anything else is an error. If the matrix turns
@@ -20,7 +20,7 @@ Run once from the project root (about 5 minutes after the download):
 
     python docs/source/tutorial/replogle/prep_tutorial_data.py
 
-Background. Until 2026-09-20 the tutorial's ``replogle_subset.h5ad`` was
+Background. Until 2026-09-20 the tutorial's ``data/replogle_subset.h5ad`` was
 derived from a copy whose ``X`` had been ``log1p``-normalised to 10,000
 counts per cell (non-integer entries, control variance 0.28x the mean), so
 every negative-binomial fit in the tutorial ran on normalised values. Step 4
@@ -45,8 +45,11 @@ DATA_DIR = HERE / "data"
 SOURCE_URL = ("https://zenodo.org/api/records/13350497/files/"
               "ReplogleWeissman2022_K562_essential.h5ad/content")
 SOURCE_PATH = DATA_DIR / "ReplogleWeissman2022_K562_essential.h5ad"
-OUT_PATH = HERE / "replogle_subset.h5ad"
-BACKUP_PATH = HERE / "replogle_subset_lognorm_backup.h5ad"
+OUT_PATH = HERE / "data/replogle_subset.h5ad"
+for _d in (DATA_DIR, HERE / "results"):
+    _d.mkdir(parents=True, exist_ok=True)
+
+BACKUP_PATH = HERE / "data/replogle_subset_lognorm_backup.h5ad"
 
 PERT_COL_CANDIDATES = ("gene", "perturbation")
 CTRL_LABEL_CANDIDATES = ("non-targeting", "control")

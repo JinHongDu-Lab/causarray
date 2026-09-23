@@ -58,7 +58,7 @@ classifiers = [
 
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "tables"]
 
 [tool.hatch.version]
 path = "causarray/__about__.py"

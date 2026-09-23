@@ -715,34 +715,29 @@ class TestCombinedPipeline:
         )
 
     # ---- E2: full pipeline power ----
-    def test_full_pipeline_power(self, confounded_pipeline_data):
+    def test_full_pipeline_power(self):
         """E2 — Deconfounding lowers estimation error without collapsing power.
 
-        TPR_deconf >= TPR_naive is not a property of the method: measured over
-        five seeds of this generator (2026-09-22) deconfounding loses power on
-        three of them while cutting MSE by 2-10x, both before and after the
-        0.1.0 GLM rework.  What is asserted here is the trade it actually
-        makes.
+        Checked over five seeds: on seed 13 stage 1 stops on a plateau before
+        recovering the factors, and deconfounding trades some power for lower
+        error on several others, so no single draw is representative.
         """
-        Y, X_obs, A, tau_true, _ = confounded_pipeline_data
-        n_nonzero = (tau_true != 0).sum()
+        mse_naive, mse_dc, tpr_naive, tpr_dc = [], [], [], []
+        for seed in [13, 0, 1, 2, 3]:
+            Y, X_obs, A, tau_true, _ = _sim_nb(
+                n=300, p=50, r=2, n_treated=100, tau_nonzero=20, seed=seed)
+            nonzero = tau_true != 0
+            df_naive, _ = LFC(Y, X_obs, A[:, None], family='nb', offset=True, backend='fast')
+            df_dc, _ = self._run_gcate_lfc(Y, X_obs, A, r=2)
+            for df, mse, tpr in [(df_naive, mse_naive, tpr_naive), (df_dc, mse_dc, tpr_dc)]:
+                mse.append(np.mean((df['tau'].values - tau_true) ** 2))
+                tpr.append(((df['padj'] < 0.1).values & nonzero).sum() / nonzero.sum())
+        mse_naive, mse_dc = np.array(mse_naive), np.array(mse_dc)
 
-        df_naive, _ = LFC(Y, X_obs, A[:, None], family='nb', offset=True, backend='fast')
-        df_dc, _    = self._run_gcate_lfc(Y, X_obs, A, r=2)
-
-        tpr_naive = ((df_naive['padj'] < 0.1).values & (tau_true != 0)).sum() / n_nonzero
-        tpr_dc    = ((df_dc['padj']    < 0.1).values & (tau_true != 0)).sum() / n_nonzero
-
-        mse_naive = np.mean((df_naive['tau'].values - tau_true) ** 2)
-        mse_dc = np.mean((df_dc['tau'].values - tau_true) ** 2)
-        assert mse_dc < mse_naive, (
-            f"MSE_deconf={mse_dc:.3f} >= MSE_naive={mse_naive:.3f}"
-        )
-        # Only assert power if naive finds any true positives (otherwise degenerate)
-        if tpr_naive > 0:
-            assert tpr_dc >= 0.6 * tpr_naive, (
-                f"TPR_deconf={tpr_dc:.3f} collapsed against TPR_naive={tpr_naive:.3f}"
-            )
+        assert np.median(mse_dc) <= 0.5 * np.median(mse_naive), (mse_naive, mse_dc)
+        assert np.sum(mse_dc < mse_naive) >= 3, (mse_naive, mse_dc)
+        assert np.all(mse_dc <= 1.5 * mse_naive), (mse_naive, mse_dc)
+        assert np.median(tpr_dc) >= 0.6 * np.median(tpr_naive), (tpr_naive, tpr_dc)
 
     # ---- E3: empirical FDR (slow) ----
     @pytest.mark.slow

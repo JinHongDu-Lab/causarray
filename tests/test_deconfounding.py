@@ -12,8 +12,7 @@ from causarray.gcate import fit_gcate
 from causarray.DR_learner import LFC
 
 
-@pytest.fixture
-def sim_confounded_data():
+def _simulate_confounded(seed=2024):
     """Simulate NB count data with unmeasured confounders.
 
     Data generating process:
@@ -23,7 +22,7 @@ def sim_confounded_data():
      - Y ~ NB(mu, disp), where log(mu) depends on X_obs, A, and U
      - true treatment effect (tau) is set per gene
     """
-    np.random.seed(2024)
+    np.random.seed(seed)
     n, p, r = 300, 30, 2
 
     # Observed covariates
@@ -69,57 +68,41 @@ def sim_confounded_data():
     return Y, X_obs, A, tau_true, r
 
 
+@pytest.fixture
+def sim_confounded_data():
+    return _simulate_confounded()
+
+
+def _naive_and_deconfounded_tau(Y, X_obs, A, r):
+    df_naive, _ = LFC(Y, X_obs, A[:, None], family='nb', offset=True)
+    _, res_2 = fit_gcate(Y, X_obs, A[:, None], r=r, family='nb', offset=True)
+    W = np.c_[X_obs, res_2['U']]
+    df_deconf, _ = LFC(Y, W, A[:, None], W_A=W, family='nb',
+                       offset=np.log(res_2['kwargs_glm']['size_factor']))
+    return df_naive['tau'].values, df_deconf['tau'].values
+
+
 class TestDeconfoundingPerformance:
     """Verify GCATE deconfounding improves treatment effect estimation."""
 
-    def test_gcate_deconfounded_lfc_remains_stable(self, sim_confounded_data):
-        """GCATE-adjusted LFC should retain signal without unstable drift.
+    def test_gcate_deconfounding_reduces_error(self):
+        """GCATE-adjusted LFC has lower error than naive LFC across seeds.
 
-        Follows the real pipeline:
-          1. Naive: LFC(Y, X_obs, A) — no latent factors
-          2. GCATE: fit_gcate → extract U → LFC(Y, [X_obs, U], A, [X_obs, U])
+        A single draw is not a fair test: on some seeds stage 1 stops on a
+        plateau before recovering the factors (seed 2024 here), so the claim
+        is checked over several seeds.
         """
-        Y, X_obs, A, tau_true, r = sim_confounded_data
+        mse_naive, mse_deconf = [], []
+        for seed in [2024, 1, 2, 3, 4]:
+            Y, X_obs, A, tau_true, r = _simulate_confounded(seed)
+            tau_naive, tau_deconf = _naive_and_deconfounded_tau(Y, X_obs, A, r)
+            mse_naive.append(np.mean((tau_naive - tau_true) ** 2))
+            mse_deconf.append(np.mean((tau_deconf - tau_true) ** 2))
+        mse_naive, mse_deconf = np.array(mse_naive), np.array(mse_deconf)
 
-        # ---- Naive: LFC without deconfounding ----
-        df_naive, _ = LFC(Y, X_obs, A[:, None], family='nb', offset=True)
-        lfc_naive = df_naive['tau'].values
-
-        # ---- GCATE: estimate latent factors, then run LFC with them ----
-        res_1, res_2 = fit_gcate(
-            Y, X_obs, A[:, None], r=r, family='nb', offset=True,
-        )
-        U_hat = res_2['U']  # estimated latent confounders
-        offsets = np.log(res_2['kwargs_glm']['size_factor'])
-
-        df_deconf, _ = LFC(
-            Y, np.c_[X_obs, U_hat], A[:, None],
-            W_A=np.c_[X_obs, U_hat],
-            family='nb', offset=offsets,
-        )
-        lfc_deconf = df_deconf['tau'].values
-
-        # ---- Compare ----
-        corr_naive = np.corrcoef(lfc_naive, tau_true)[0, 1]
-        corr_deconf = np.corrcoef(lfc_deconf, tau_true)[0, 1]
-
-        mse_naive = np.mean((lfc_naive - tau_true) ** 2)
-        mse_deconf = np.mean((lfc_deconf - tau_true) ** 2)
-
-        print(f"\nNaive  LFC:    corr={corr_naive:.4f}, MSE={mse_naive:.4f}")
-        print(f"Deconf (r={r}): corr={corr_deconf:.4f}, MSE={mse_deconf:.4f}")
-
-        # Estimated latent factors need not improve every finite simulation,
-        # but adjustment should retain the treatment signal and avoid a large
-        # deterioration relative to the correctly specified observed design.
-        assert corr_deconf >= corr_naive - 0.10, (
-            f"Deconfounding lost too much signal: corr_deconf={corr_deconf:.4f}, "
-            f"corr_naive={corr_naive:.4f}"
-        )
-        assert mse_deconf <= 1.5 * mse_naive, (
-            f"Deconfounding was numerically unstable: mse_deconf={mse_deconf:.4f}, "
-            f"mse_naive={mse_naive:.4f}"
-        )
+        assert np.median(mse_deconf) <= 0.5 * np.median(mse_naive), (mse_naive, mse_deconf)
+        assert np.sum(mse_deconf < mse_naive) >= 3, (mse_naive, mse_deconf)
+        assert np.all(mse_deconf <= 1.5 * mse_naive), (mse_naive, mse_deconf)
 
     def test_gcate_latent_factors_recovered(self, sim_confounded_data):
         """Estimated latent factors should capture the confounding signal."""

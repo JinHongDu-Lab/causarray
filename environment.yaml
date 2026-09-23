@@ -14,7 +14,7 @@ dependencies:
   - numpy>2
   - pandas
   - pip  
-  - python>=3.8
+  - python>=3.10
   - scanpy
   - scikit-learn>=1.6
   - scipy

@@ -235,36 +235,52 @@ class TestOnDiskNBGLM:
     """Test on-disk NB-GLM fitting using crispyx streaming functions."""
 
     @pytest.fixture
-    def adamson_path(self):
-        """Path to the Adamson_subset dataset."""
-        path = (
-            '/Users/dujinhong/Library/CloudStorage/OneDrive-TheUniversityOfHongKong/'
-            'Streamlining-CRISPR-Screen-Analysis/Streamlining-CRISPR-Screen-Analysis/'
-            'data/Adamson_subset.h5ad'
-        )
-        if not os.path.exists(path):
-            pytest.skip("Adamson_subset.h5ad not found")
-        return path
+    def adamson(self):
+        """An Adamson h5ad with its perturbation column and control label.
 
-    def test_fit_glm_ondisk_vs_inmemory(self, adamson_path):
+        Repo-relative by default (the tutorial subset); point
+        ``CAUSARRAY_TEST_H5AD`` at another file to use that instead.  No
+        absolute path belongs in a test -- it only runs on one machine.
+        """
+        import anndata as ad
+
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.environ.get('CAUSARRAY_TEST_H5AD') or os.path.join(
+            repo, 'docs', 'source', 'tutorial', 'adamson', 'data',
+            'adamson_subset.h5ad')
+        if not os.path.exists(path):
+            pytest.skip(f"{os.path.relpath(path, repo)} not found; "
+                        "set CAUSARRAY_TEST_H5AD to another h5ad")
+        adata = ad.read_h5ad(path, backed='r')
+        pert_col = adata.uns.get('pert_col', 'perturbation')
+        ctrl = adata.uns.get('ctrl_label', 'control')
+        labels = adata.obs[pert_col].astype(str).values
+        adata.file.close()
+        target = next((p for p in np.unique(labels) if p != ctrl), None)
+        if target is None:
+            pytest.skip("no non-control perturbation in the test h5ad")
+        return path, pert_col, ctrl, target
+
+    def test_fit_glm_ondisk_vs_inmemory(self, adamson):
         """On-disk fitting should produce results comparable to in-memory."""
         import anndata as ad
         from causarray.nb_glm_fast import fit_glm_fast, fit_glm_ondisk
 
-        adata = ad.read_h5ad(adamson_path)
+        path, pert_col, ctrl, target = adamson
+        adata = ad.read_h5ad(path)
         # Use a small subset of genes for speed
         Y = np.asarray(adata.X[:, :100].toarray() if hasattr(adata.X, 'toarray') else adata.X[:, :100], dtype=float)
         n = Y.shape[0]
 
-        # Binary treatment: control vs first perturbation
-        perturbations = adata.obs['perturbation'].values
-        unique_perts = [p for p in np.unique(perturbations) if p != 'control']
-        if len(unique_perts) == 0:
-            pytest.skip("No non-control perturbations found")
-
-        mask = np.isin(perturbations, ['control', unique_perts[0]])
+        # Binary treatment: control vs the first perturbation
+        perturbations = adata.obs[pert_col].astype(str).values
+        mask = np.isin(perturbations, [ctrl, target])
         Y_sub = Y[mask]
-        A_sub = (perturbations[mask] != 'control').astype(float)[:, None]
+        A_sub = (perturbations[mask] != ctrl).astype(float)[:, None]
+        # Size factors come from the genes read, so cells with no counts among
+        # them have no offset; fit_glm_ondisk drops them, so do the same here.
+        nonempty = Y_sub.sum(axis=1) > 0
+        Y_sub, A_sub = Y_sub[nonempty], A_sub[nonempty]
         X_sub = np.ones((Y_sub.shape[0], 1))
 
         # In-memory fit
@@ -274,10 +290,10 @@ class TestOnDiskNBGLM:
 
         # On-disk fit (reads from h5ad)
         B_disk, Yhat_disk, disp_disk, _, _ = fit_glm_ondisk(
-            adamson_path,
-            perturbation_col='perturbation',
-            control_label='control',
-            target_label=unique_perts[0],
+            path,
+            perturbation_col=pert_col,
+            control_label=ctrl,
+            target_label=target,
             gene_indices=np.arange(100),
         )
 
@@ -287,15 +303,16 @@ class TestOnDiskNBGLM:
         corr = np.corrcoef(B_mem[:, -1], B_disk[:, -1])[0, 1]
         assert corr > 0.7, f"On-disk vs in-memory LFC correlation: {corr:.3f}"
 
-    def test_fit_glm_ondisk_produces_valid_output(self, adamson_path):
+    def test_fit_glm_ondisk_produces_valid_output(self, adamson):
         """On-disk fitting should produce finite, well-shaped output."""
         from causarray.nb_glm_fast import fit_glm_ondisk
 
+        path, pert_col, ctrl, target = adamson
         B, Yhat, disp, offsets, resid_dev = fit_glm_ondisk(
-            adamson_path,
-            perturbation_col='perturbation',
-            control_label='control',
-            target_label='AMIGO3',
+            path,
+            perturbation_col=pert_col,
+            control_label=ctrl,
+            target_label=target,
             gene_indices=np.arange(50),
         )
 

@@ -52,20 +52,29 @@ class TestLFCOutputSchema:
 
         assert means.dtype == np.float64
 
-    def test_nonpositive_arm_mean_is_nonestimable(self):
+    def test_nonpositive_arm_mean_with_observed_counts_is_nonestimable(self):
+        # Control arm has observed counts but a negative AIPW mean (the
+        # pseudo-outcome correction overshoots): that stays non-estimable.
+        # (Since 0.1.0 an arm with *no* observed counts is instead kept
+        # estimable at the floor; see test_small_arm_inference.)
+        # With calibrated scores the AIPW arm mean equals the observed arm
+        # mean, so a negative value needs miscalibrated scores: pi = 0.5 for a
+        # 1-in-4 treatment gives mean_control = (2*sum(Y_ctrl) - 2*mu)/4 = -0.5.
         Y = np.zeros((4, 1), dtype=float)
+        Y[0, 0] = 1.0
         W = np.ones((4, 1), dtype=float)
-        A = np.array([0, 0, 1, 1], dtype=float)
+        A = np.array([0, 0, 0, 1], dtype=float)
         Y_hat = np.full((4, 1, 1, 2), 2.0)
         pi_hat = np.full((4, 1), 0.5)
 
         with pytest.warns(RuntimeWarning, match='non-estimable'):
             result, _ = LFC(
                 Y, W, A, Y_hat=Y_hat, pi_hat=pi_hat, family='poisson',
+                ps_clip=None,
             )
 
-        assert result.loc[0, 'mean_control'] == 0
-        assert result.loc[0, 'mean_treated'] == 0
+        assert result.loc[0, 'mean_control'] == pytest.approx(-0.5)
+        assert result.loc[0, 'mean_treated'] == pytest.approx(1.0)
         assert not bool(result.loc[0, 'estimable'])
         assert result.loc[0, 'tau'] == 0
         assert np.isinf(result.loc[0, 'std'])

@@ -12,13 +12,15 @@ __all__ = [
     'reset_random_seeds', 'fit_gcate', 'fit_gcate_batch',
     'estimate_propensity_scores', 'summarize_propensity_scores',
     'plot_propensity_scores', 'refit_propensity_scores',
+    'tune_penalty_factor',
     'summarize_treatment_associations', 'plot_treatment_associations',
     'align_test_mask',
     ]
 
 
 from causarray.DR_learner import LFC, gcate_lfc_batch, LFC_batch  # ATE, SATE, FC
-from causarray.DR_estimation import estimate_propensity_scores, refit_propensity_scores
+from causarray.DR_estimation import (
+    estimate_propensity_scores, refit_propensity_scores, tune_penalty_factor)
 from causarray.diagnostics import (
     summarize_propensity_scores, plot_propensity_scores,
     summarize_treatment_associations, plot_treatment_associations,

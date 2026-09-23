@@ -391,6 +391,126 @@ def test_lfc_batch_cache_path(small_data, tmp_path):
     np.testing.assert_allclose(df_resumed['log2fc_se'], df_resumed['std'] / np.log(2.0))
 
 
+
+def test_lfc_batch_save_nuisances(small_data, tmp_path):
+    """save_nuisances: outcome predictions persist and support re-estimation.
+
+    The outcome model does not depend on the propensity design, so the stored
+    ``Y_hat`` must let :func:`LFC` re-estimate under a different propensity
+    specification without refitting it.
+    """
+    import h5py
+
+    from causarray.DR_learner import LFC, _nuisance_path_for
+
+    Y, X, A = small_data
+    cache = str(tmp_path / 'cache.h5')
+
+    df_full = gcate_lfc_batch(
+        Y, X, A, r=2, batch_size=3, max_cells=200, n_ctrl=30,
+        family='nb', gcate_kwargs=_GCATE_KW, cache_path=cache,
+        save_nuisances=True,
+    )
+
+    nuisance = _nuisance_path_for(cache)
+    n_batches = int(np.ceil(A.shape[1] / 3))
+    with h5py.File(nuisance, 'r') as handle:
+        assert sorted(handle.keys()) == [f'batch_{i:04d}' for i in range(n_batches)]
+        group = handle['batch_0000']
+        assert {'Y_hat', 'pi_hat', 'cell_idx', 'offset', 'U'} <= set(group.keys())
+        Y_hat = group['Y_hat'][:]
+        cell_idx = group['cell_idx'][:]
+        offset = group['offset'][:]
+        U = group['U'][:]
+        pert_names = [n.decode() if isinstance(n, bytes) else n
+                      for n in group['pert_names'][:]]
+
+    # Y_hat holds counterfactual predictions per cell, gene, treatment and arm.
+    assert Y_hat.shape == (len(cell_idx), Y.shape[1], len(pert_names), 2)
+    assert U.shape == (len(cell_idx), 2)
+
+    # The result cache must keep exactly the keys that drive resumption.
+    with pd.HDFStore(cache, mode='r') as store:
+        assert sorted(k for k in store.keys() if k.startswith('/batch_')) == [
+            f'/batch_{i:04d}' for i in range(n_batches)]
+
+    # Re-estimating batch 0 from the stored predictions reproduces its rows.
+    # A is a plain array here, so the stored names are its column indices.
+    cols = [int(name) for name in pert_names]
+    Y_b = np.asarray(Y)[cell_idx]
+    A_b = pd.DataFrame(np.asarray(A)[np.ix_(cell_idx, cols)], columns=pert_names)
+    W_b = np.c_[np.asarray(X)[cell_idx], U]
+    df_reused, _ = LFC(Y_b, W_b, A_b, W_b, family='nb', offset=offset, Y_hat=Y_hat)
+
+    expected = df_full[df_full['batch'] == 0].copy()
+    expected['trt'] = expected['trt'].astype(str)
+    df_reused['trt'] = df_reused['trt'].astype(str)
+    merged = expected.merge(df_reused, on=['gene_names', 'trt'], suffixes=('', '_reused'))
+    assert len(merged) == len(expected)
+    np.testing.assert_allclose(merged['tau'], merged['tau_reused'], rtol=1e-5, atol=1e-7)
+
+
+def test_nuisance_store_bytes_counts_every_axis():
+    """Y_hat is (n_cells, n_genes, n_treatments, 2) in float32."""
+    from causarray.DR_learner import _nuisance_store_bytes
+
+    batches = [{'cell_idx': list(range(100)), 'pert_names': list(range(3))},
+               {'cell_idx': list(range(50)), 'pert_names': list(range(2))}]
+    assert _nuisance_store_bytes(batches, 10) == 8 * (100 * 10 * 3 + 50 * 10 * 2)
+    batches[1]['skipped'] = True          # a skipped batch writes nothing
+    assert _nuisance_store_bytes(batches, 10) == 8 * 100 * 10 * 3
+
+
+def test_warn_nuisance_store_size_only_for_large_stores(tmp_path, recwarn):
+    from causarray.DR_learner import NUISANCE_WARN_BYTES, _warn_nuisance_store_size
+
+    path = str(tmp_path / 'cache.nuisances.h5')
+    small = [{'cell_idx': list(range(10)), 'pert_names': [0]}]
+    _warn_nuisance_store_size(small, 10, path)
+    assert not [w for w in recwarn if issubclass(w.category, ResourceWarning)]
+
+    n_cells = int(NUISANCE_WARN_BYTES // (8 * 1000 * 2)) + 1000
+    large = [{'cell_idx': list(range(n_cells)), 'pert_names': [0, 1]}]
+    with pytest.warns(ResourceWarning, match='save_nuisances will write about'):
+        total = _warn_nuisance_store_size(large, 1000, path)
+    assert total > NUISANCE_WARN_BYTES
+
+
+def test_lfc_batch_save_nuisances_requires_cache_path(small_data, monkeypatch):
+    """save_nuisances without cache_path is rejected before any fitting."""
+    import causarray.gcate as gcate_mod
+
+    def fail(*args, **kwargs):
+        raise AssertionError('GCATE ran before the argument check')
+
+    monkeypatch.setattr(gcate_mod, 'fit_gcate_batch', fail)
+    Y, X, A = small_data
+    with pytest.raises(ValueError, match='requires cache_path'):
+        gcate_lfc_batch(
+            Y, X, A, r=2, batch_size=3, max_cells=200, n_ctrl=30,
+            family='nb', gcate_kwargs=_GCATE_KW, save_nuisances=True,
+        )
+
+
+def test_lfc_batch_resume_refits_batches_missing_nuisances(small_data, tmp_path):
+    """A cached batch without saved nuisances is refitted on resume."""
+    import h5py
+
+    from causarray.DR_learner import _nuisance_path_for
+
+    Y, X, A = small_data
+    cache = str(tmp_path / 'cache.h5')
+    kw = dict(r=2, batch_size=3, max_cells=200, n_ctrl=30, family='nb',
+              gcate_kwargs=_GCATE_KW, cache_path=cache)
+    df_first = gcate_lfc_batch(Y, X, A, **kw)
+    df_resumed = gcate_lfc_batch(Y, X, A, save_nuisances=True, **kw)
+
+    n_batches = int(np.ceil(A.shape[1] / 3))
+    with h5py.File(_nuisance_path_for(cache), 'r') as handle:
+        assert sorted(handle.keys()) == [f'batch_{i:04d}' for i in range(n_batches)]
+    np.testing.assert_allclose(df_first['tau'], df_resumed['tau'])
+
+
 def test_lfc_batch_deprecation_warning(small_data):
     """LFC_batch should emit DeprecationWarning."""
     import warnings

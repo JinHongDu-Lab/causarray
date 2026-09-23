@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.1.0]
+
+Inference fix for small perturbation arms, and the GLM engine moves to crispyx
+(>= 0.1.5 now required).
+
+### Changed
+
+- **crispyx >= 0.1.5 is required.** `causarray/glm_onehot.py`, the two-stage
+  per-perturbation fitter and the design preconditioner are removed in favour
+  of crispyx's `StructuredGLMBatchFitter` and dense batch fitter, which agree
+  with the statsmodels path to 2e-5 on well-conditioned genes.
+- `fit_glm_auto` routes on gene count only (`_FAST_MIN_P = 10`), with the
+  `_FAST_MAX_COEF` divergence check falling back to statsmodels.
+- Fitted means are no longer floored at `min_mu = 0.5`, which biased genes
+  below about one count per cell.
+- `LFC` uses the influence-function variance (`usevar='pooled'`) only; the
+  Welch `'unequal'` variance overstated standard errors.
+- Propensity scores default to calibrated probabilities
+  (`class_weight=None`); `'balanced'` remains available.
+- `ps_clip` defaults to `'auto'`, a prevalence-aware bound per treatment;
+  resolved bounds are returned as `estimation['ps_clip_bounds']`.
+- `LFC` default `thres_min='auto'` tests a gene only when about `min_counts`
+  (default 5) counts are expected in the smaller arm.
+
+### Added
+
+- A Poisson variance floor `1/(n1*tau1) + 1/(n0*tau0)` in `LFC`, so chance
+  all-zero arms of sparse genes are not called while complete knockouts stay
+  significant (`var_floored` column).
+- Small-sample correction for `K=1`: variance scaled by `n/(n-d)` and a t
+  reference with `n-d` degrees of freedom.
+- Per-pair support columns `n_treated`, `n_control`, `count_treated`,
+  `count_control` and `std_raw` in every `LFC` result.
+- `RuntimeWarning`s for arms under 200 cells hitting the variance floor, and
+  for `backend='fast'` without crispyx.
+- `tune_penalty_factor` picks the smallest per-treatment L2 penalty on one
+  propensity covariate that meets a support target, checking the
+  dropped-covariate limit first to detect infeasible treatments.
+- `gcate_lfc_batch(save_nuisances=True)` saves each batch's outcome-model
+  predictions to `<cache_path stem>.nuisances.h5` for re-estimation under a
+  different propensity model; budget about
+  `8 * n_cells * n_genes * n_treatments` bytes per batch.
+- `estimate_r` accepts `backend` and returns a `time_s` column.
+
+### Performance
+
+- Designs with one-hot treatment blocks are solved by a Schur complement,
+  flat in the number of treatments (n = p = 3,000: 5.1 s with 10 treatments,
+  7.7 s with 200).
+- GCATE's objective and gradients use parallel numba kernels with a fixed
+  reduction order (results independent of thread count); one update on a
+  3,000 x 3,000 problem drops from ~2.3 s to 0.5 s.
+- `estimate_r` fits the initial `[X | A]` GLM once for all candidate `r`.
+
+### Fixed
+
+- NB dispersion falls back to the per-gene `estimate_disp` when no batched
+  estimate is available, instead of a fixed size of 1.
+- `estimate_disp` and `fit_glm` accept `offset=False`.
+- `fit_glm` with several treatments and `impute=False` returned zero
+  coefficients.
+- `mem_limit_gb` is honoured on every imputation route.
+- `fit_glm_ondisk` drops cells with no counts (with a warning) instead of
+  returning `NaN` coefficients.
+
+### Deprecated
+
+- `LFC(usevar='unequal')` is an alias of `'pooled'` and warns.
+- `LFC(eps_var=...)` is ignored; the variance floor supersedes it.
+
 ## [0.0.9] - 2026-07-23
 
 ### Added

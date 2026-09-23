@@ -14,6 +14,7 @@ from unittest.mock import patch
 from causarray import (
     LFC,
     estimate_propensity_scores,
+    tune_penalty_factor,
     plot_propensity_scores,
     plot_treatment_associations,
     refit_propensity_scores,
@@ -28,9 +29,10 @@ def test_intercept_only_scores_respect_class_weight():
     A[60:80, 0] = 1
     A[80:100, 1] = 1
 
-    balanced = estimate_propensity_scores(A, np.ones((100, 1)))
-    calibrated = estimate_propensity_scores(
-        A, np.ones((100, 1)), class_weight=None)
+    # Since 0.1.0 the default is calibrated; 'balanced' is the legacy option.
+    calibrated = estimate_propensity_scores(A, np.ones((100, 1)))
+    balanced = estimate_propensity_scores(
+        A, np.ones((100, 1)), class_weight='balanced')
 
     np.testing.assert_allclose(balanced, 0.5)
     np.testing.assert_allclose(calibrated[:, 0], 0.25)
@@ -45,8 +47,8 @@ def test_calibrated_option_improves_probability_calibration():
     A = rng.binomial(1, true_pi)
     X = np.c_[np.ones(n), z]
 
-    balanced = estimate_propensity_scores(A, X)
-    calibrated = estimate_propensity_scores(A, X, class_weight=None)
+    calibrated = estimate_propensity_scores(A, X)
+    balanced = estimate_propensity_scores(A, X, class_weight='balanced')
 
     assert abs(calibrated.mean() - A.mean()) < 0.02
     assert abs(balanced.mean() - A.mean()) > 0.15
@@ -114,7 +116,7 @@ def test_cross_fitting_can_return_raw_and_clipped_scores():
     assert clipped.min() >= 0.1 and clipped.max() <= 0.9
 
 
-def test_cross_fitting_preserves_balanced_default_and_allows_calibrated_scores():
+def test_cross_fitting_defaults_to_calibrated_and_allows_balanced_scores():
     rng = np.random.default_rng(31)
     n, p = 300, 3
     z = rng.standard_normal(n)
@@ -123,15 +125,15 @@ def test_cross_fitting_preserves_balanced_default_and_allows_calibrated_scores()
     Y = rng.poisson(2, (n, p)).astype(float)
     Y_hat = np.ones((n, p, 1, 2))
 
-    _, _, legacy = cross_fitting(
-        Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-    )
     _, _, calibrated = cross_fitting(
         Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-        ps_class_weight=None,
     )
-    expected_calibrated = estimate_propensity_scores(A, X, class_weight=None)
-    expected_legacy = estimate_propensity_scores(A, X)
+    _, _, legacy = cross_fitting(
+        Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
+        ps_class_weight='balanced',
+    )
+    expected_calibrated = estimate_propensity_scores(A, X)
+    expected_legacy = estimate_propensity_scores(A, X, class_weight='balanced')
 
     np.testing.assert_allclose(calibrated, expected_calibrated)
     np.testing.assert_allclose(legacy, expected_legacy)
@@ -150,11 +152,11 @@ def test_deprecated_class_weight_overrides_default():
     with pytest.warns(FutureWarning, match='ps_class_weight'):
         _, _, raw = cross_fitting(
             Y, A, X, X, Y_hat=Y_hat, return_raw_pi=True,
-            class_weight=None,
+            class_weight='balanced',
         )
 
     np.testing.assert_allclose(
-        raw, estimate_propensity_scores(A, X, class_weight=None))
+        raw, estimate_propensity_scores(A, X, class_weight='balanced'))
 
 
 def test_propensity_summary_and_plot_for_named_treatments():
@@ -532,3 +534,154 @@ def test_treatment_associations_support_per_treatment_bh():
 
     with pytest.raises(ValueError, match="bh_scope must be"):
         summarize_treatment_associations(A, Z, bh_scope='per_covariate')
+
+
+# ---------------------------------------------------------------------------
+# tune_penalty_factor
+# ---------------------------------------------------------------------------
+
+def _separating_design(n=400, seed=0):
+    """One arm separated by a single covariate, one arm overlapping."""
+    rng = np.random.default_rng(seed)
+    A = np.zeros((n, 2))
+    A[:40, 0] = 1        # separated arm
+    A[40:80, 1] = 1      # benign arm
+    ctrl = A.sum(axis=1) == 0
+    sep = rng.normal(0, 1, n)
+    sep[A[:, 0] == 1] += 6.0          # drives near-perfect separation
+    noise = rng.normal(0, 1, n)
+    X_A = np.column_stack([np.ones(n), sep, noise])
+    names = ['sep_arm', 'benign_arm']
+    cov = ['intercept', 'driver', 'noise']
+    return A, X_A, names, cov, ctrl
+
+
+def test_tune_penalty_factor_recovers_overlap_for_the_separated_arm():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['feasible']
+    assert row['auc_unpenalized'] > 0.9
+    assert row['auc_chosen'] < 0.9
+    assert factors['sep_arm']['driver'] > 1.0
+    # the benign arm is never triggered, so it gets no penalty
+    assert 'benign_arm' not in factors
+    assert 'benign_arm' not in report['treatment'].tolist()
+
+
+def test_tune_penalty_factor_leaves_untouched_arms_identical():
+    A, X_A, names, cov, _ = _separating_design()
+    base = estimate_propensity_scores(A, X_A, K=1, clip=None, random_state=0)
+    factors, _ = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, random_state=0)
+    updated, _ = refit_propensity_scores(
+        A, X_A, pi_hat=base.copy(), treatment_names=names, covariate_names=cov,
+        penalty_factors_by_treatment=factors, K=1, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    np.testing.assert_array_equal(base[:, j], updated[:, j])
+
+
+def test_tune_penalty_factor_reports_infeasible_without_searching():
+    """Dropping the covariate is the infinite-penalty limit, so a target the
+    dropped fit misses cannot be reached by any finite factor."""
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.0},   # unreachable
+        bracket=(1.0, 500.0), random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert not row['feasible']
+    assert not row['target_met']
+    assert row['n_fits'] == 3          # baseline, dropped endpoint, chosen factor
+    # default on_infeasible='best' gives the arm the closest attainable support
+    assert row['penalty_factor'] == 500.0
+    assert factors['sep_arm']['driver'] == 500.0
+
+
+def test_tune_penalty_factor_infeasible_none_leaves_arm_unpenalized():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.0},
+        on_infeasible='none', random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert not row['feasible']
+    assert row['penalty_factor'] == 1.0
+    assert factors == {}
+    with pytest.raises(ValueError, match="on_infeasible"):
+        tune_penalty_factor(A, X_A, 'driver', treatment_names=names,
+                            covariate_names=cov, trigger={'auc_gt': 0.9},
+                            target={'auc_lt': 0.0}, on_infeasible='nope')
+
+
+def test_tune_penalty_factor_returns_no_penalty_when_target_already_met():
+    A, X_A, names, cov, _ = _separating_design()
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.5},        # triggers the benign arm too
+        target={'auc_lt': 1.01},        # already satisfied everywhere
+        random_state=0)
+    assert factors == {}
+    assert (report['penalty_factor'] == 1.0).all()
+
+
+def test_tune_penalty_factor_rejects_unknown_metric_and_covariate():
+    A, X_A, names, cov, _ = _separating_design()
+    with pytest.raises(ValueError, match='names no metric'):
+        tune_penalty_factor(A, X_A, 'driver', treatment_names=names,
+                            covariate_names=cov, target={'ess_treated_lt': 0.5})
+    with pytest.raises(ValueError, match='not in covariate_names'):
+        tune_penalty_factor(A, X_A, 'nope', treatment_names=names,
+                            covariate_names=cov)
+
+
+def test_tune_penalty_factor_tolerance_controls_fit_count():
+    A, X_A, names, cov, _ = _separating_design()
+    _, coarse = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, tol=1.5, random_state=0)
+    _, fine = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 0.9}, tol=0.05, random_state=0)
+    assert coarse['n_fits'].sum() < fine['n_fits'].sum()
+    # a finer search cannot need a larger factor than a coarser one
+    assert fine['penalty_factor'].iloc[0] <= coarse['penalty_factor'].iloc[0] * 1.5
+
+
+def test_tune_penalty_factor_scores_the_factor_it_reports():
+    """When no finite factor in the bracket meets the target, the chosen
+    metrics come from that factor's fit, not the dropped-covariate fit."""
+    A, X_A, names, cov, _ = _separating_design()
+    _, probe = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': 1.01}, random_state=0)
+    auc_dropped = probe.set_index('treatment').loc['sep_arm', 'auc_dropped']
+    factors, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.9}, target={'auc_lt': auc_dropped + 1e-9},
+        bracket=(1.0, 2.0), random_state=0)
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['feasible']
+    assert not row['target_met']
+    assert row['penalty_factor'] == 2.0
+    assert row['auc_chosen'] > auc_dropped
+
+
+def test_tune_penalty_factor_scores_only_masked_cells():
+    A, X_A, names, cov, ctrl = _separating_design()
+    mask = np.ones(A.shape, dtype=bool)
+    mask[np.flatnonzero(ctrl)[:100], :] = False
+    _, report = tune_penalty_factor(
+        A, X_A, 'driver', treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.0}, mask=mask, random_state=0)
+    pi = estimate_propensity_scores(A, X_A, mask=mask, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    keep = (ctrl | (A[:, j] == 1)) & mask[:, j]
+    from sklearn.metrics import roc_auc_score
+    expected = roc_auc_score(A[keep, j], pi[keep, j])
+    got = report.set_index('treatment').loc['benign_arm', 'auc_unpenalized']
+    assert got == pytest.approx(expected)
+

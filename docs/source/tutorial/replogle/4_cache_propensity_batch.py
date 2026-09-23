@@ -19,6 +19,8 @@ import scanpy as sc
 
 
 HERE = Path(__file__).resolve().parent
+for _d in (HERE / "data", HERE / "results"):
+    _d.mkdir(parents=True, exist_ok=True)
 REPO_ROOT = HERE.parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -37,13 +39,14 @@ from causarray.utils import (  # noqa: E402
 )
 
 
-RAW_PATH = HERE / "replogle_subset.h5ad"
-R_PATH = HERE / "replogle-r.csv"
-CACHE_PATH = HERE / "replogle_propensity_batch12.npz"
-BASELINE_PATH = HERE / "replogle_propensity_batch12_baseline.csv.gz"
-SUMMARY_PATH = HERE / "replogle_propensity_batch12_summary.csv"
-TUNING_PATH = HERE / "replogle_propensity_batch12_tuning.csv"
-SCORES_PATH = HERE / "replogle_propensity_batch12_selected_scores.npz"
+RAW_PATH = HERE / "data/replogle_subset.h5ad"
+R_PATH = (HERE / "results/replogle-r.csv" if (HERE / "results/replogle-r.csv").exists()
+          else HERE / "results/replogle-r-legacy.csv")  # the raw-count JIC table, as the notebook uses
+CACHE_PATH = HERE / "results/replogle_propensity_batch12.npz"
+BASELINE_PATH = HERE / "results/replogle_propensity_batch12_baseline.csv.gz"
+SUMMARY_PATH = HERE / "results/replogle_propensity_batch12_summary.csv"
+TUNING_PATH = HERE / "results/replogle_propensity_batch12_tuning.csv"
+SCORES_PATH = HERE / "results/replogle_propensity_batch12_selected_scores.npz"
 
 BATCH_INDEX = 12
 N_BATCHES = 14
@@ -206,7 +209,6 @@ def build_cache(force: bool = False):
         W_A,
         family="nb",
         offset=offset,
-        usevar="unequal",
     )
     print(f"Focal batch fit completed in {(time.perf_counter() - started) / 60:.1f} min")
 
@@ -250,6 +252,26 @@ def _validate_cache(cache):
         raise ValueError("Intermediate cache does not contain every focal perturbation")
 
 
+def auto_clip_bounds(A):
+    """Per-arm bounds matching ``LFC(ps_clip='auto')``.
+
+    ``lower_j = min(0.01, prevalence_j / 10)`` and the mirrored upper bound,
+    with prevalence taken over the cells eligible for treatment ``j``.  The
+    diagnostic has to use the same bounds as the estimator, otherwise its ESS
+    and overlap describe weights that LFC never forms.
+    """
+    A = np.asarray(A, dtype=float)
+    ctrl = A.sum(axis=1) == 0
+    lower = np.empty(A.shape[1])
+    upper = np.empty(A.shape[1])
+    for j in range(A.shape[1]):
+        eligible = ctrl | (A[:, j] == 1)
+        prevalence = float(A[eligible, j].mean())
+        lower[j] = min(0.01, prevalence / 10.0)
+        upper[j] = 1.0 - min(0.01, (1.0 - prevalence) / 10.0)
+    return lower, upper
+
+
 def run_sensitivities(force: bool = False):
     """Reuse cached outcomes across the prespecified propensity grid."""
     build_cache(force=force)
@@ -268,32 +290,64 @@ def run_sensitivities(force: bool = False):
     baseline = pd.read_csv(BASELINE_PATH)
 
     settings = [
-        ("fitted balanced C=1", cache["pi_hat_raw"].astype(float), (0.01, 0.99), "fitted"),
+        ("fitted calibrated C=1", cache["pi_hat_raw"].astype(float), "auto", "fitted"),
     ]
     for label, class_weight, C in (
-        ("OOF balanced C=1", "balanced", 1.0),
-        ("OOF balanced C=0.1", "balanced", 0.1),
-        ("OOF balanced C=0.01", "balanced", 0.01),
+        # The displayed sweep varies regularization on the unweighted model that
+        # LFC actually fits; the balanced row is kept only as a historical contrast.
         ("OOF calibrated C=1", None, 1.0),
+        ("OOF calibrated C=0.1", None, 0.1),
+        ("OOF calibrated C=0.01", None, 0.01),
+        ("OOF balanced C=1", "balanced", 1.0),
     ):
         scores = estimate_propensity_scores(
             A, W_A, K=5, random_state=RANDOM_STATE,
             class_weight=class_weight, C=C, clip=None,
         )
-        settings.append((label, scores, (0.01, 0.99), "oof"))
+        settings.append((label, scores, "auto", "oof"))
+
+    # Column 1 of X_A is the standardized log library size that
+    # ``prep_causarray_data`` appends.  These rows drop it from the propensity
+    # design only, as the endpoint against which a penalty on that coefficient
+    # is judged; the outcome model keeps its size-factor offset either way.
+    W_A_no_lib = np.delete(W_A, 1, axis=1)
+    for label, C in (
+        ("OOF no-libsize C=1", 1.0),
+        ("OOF no-libsize C=0.1", 0.1),
+        ("OOF no-libsize C=0.01", 0.01),
+    ):
+        scores = estimate_propensity_scores(
+            A, W_A_no_lib, K=5, random_state=RANDOM_STATE,
+            class_weight=None, C=C, clip=None,
+        )
+        settings.append((label, scores, "auto", "oof"))
     settings.append(
-        ("OOF calibrated C=1, clip 0.05", settings[-1][1], (0.05, 0.95), "oof")
+        ("OOF calibrated C=1, clip 0.05",
+         next(s[1] for s in settings if s[0] == "OOF calibrated C=1"),
+         (0.05, 0.95), "oof")
     )
 
     score_tables = []
     tuning_rows = []
     selected_scores = {"A": A.astype(np.uint8), "perturbations": perturbations}
     baseline_indexed = baseline.set_index(["trt", "gene_names"])
+    auto_lower, auto_upper = auto_clip_bounds(A)
     for label, raw_scores, clip, score_type in settings:
-        clipped_scores = np.clip(raw_scores, *clip)
+        if clip == "auto":
+            lower, upper = auto_lower, auto_upper
+        else:
+            lower = np.full(A.shape[1], clip[0])
+            upper = np.full(A.shape[1], clip[1])
+        clipped_scores = np.clip(raw_scores, lower[None, :], upper[None, :])
+        # clip_bounds=None because the bounds vary by arm; count them per arm below.
         summary = summarize_propensity_scores(
-            A, clipped_scores, treatment_names=perturbations, clip_bounds=clip
+            A, clipped_scores, treatment_names=perturbations, clip_bounds=None
         )
+        summary["clipped_fraction"] = [
+            float(np.isclose(clipped_scores[:, j], lower[j]).mean()
+                  + np.isclose(clipped_scores[:, j], upper[j]).mean())
+            for j in range(A.shape[1])
+        ]
         summary.insert(0, "model", label)
         summary.insert(1, "score_type", score_type)
         summary.insert(2, "clip", str(clip))
@@ -313,8 +367,7 @@ def run_sensitivities(force: bool = False):
             offset=offset,
             Y_hat=Y_hat,
             pi_hat=raw_scores,
-            ps_clip=clip,
-            usevar="unequal",
+            ps_clip=clip if clip == "auto" else tuple(clip),
         )
         indexed = result.set_index(["trt", "gene_names"])
         for perturbation in perturbations:

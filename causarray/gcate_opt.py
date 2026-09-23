@@ -104,7 +104,7 @@ def update(Y, A, B, d, lam, P1, P2,
     """
     n, p = Y.shape
 
-    g = grad(Y.T, B, A, family, nuisance.T, thres_disp)
+    g = grad_cells(Y, A, B, family, nuisance, thres_disp)
     g[:, :d] = 0.
     for i in prange(n):
         g[i, d:] = project_norm_ball(g[i, d:], 2*C)
@@ -117,7 +117,7 @@ def update(Y, A, B, d, lam, P1, P2,
         # P1 is the thin Q factor (n, d_X), not the full (n, n) matrix.
         A[:, d:] -= P1 @ (P1.T @ A[:, d:])
 
-    g = grad(Y, A, B, family, nuisance, thres_disp)
+    g = grad_genes(Y, A, B, family, nuisance, thres_disp)
     if P1 is not None:
         g[:, :d] = 0.
     elif P2 is not None:
@@ -140,7 +140,7 @@ def update(Y, A, B, d, lam, P1, P2,
 
     if P2 is None:
         B[:, d:] = np.clip(B[:, d:], -10., 10.)
-    func_val = nll(Y, A, B, family, nuisance, Ys, thres_disp)
+    func_val = nll_mat(Y, A, B, family, nuisance, Ys, thres_disp)
 
     return func_val, A, B
 
@@ -165,7 +165,7 @@ def update_with_mask(Y, A, B, d, lam, P1, P2,
     n, p = Y.shape
 
     # ---- A-step (update cell latent factors) ----
-    g = grad(Y.T, B, A, family, nuisance.T, thres_disp)
+    g = grad_cells(Y, A, B, family, nuisance, thres_disp)
     g[:, :d] = 0.
     for i in prange(n):
         if cell_active[i]:
@@ -179,7 +179,7 @@ def update_with_mask(Y, A, B, d, lam, P1, P2,
         A[:, d:] -= P1 @ (P1.T @ A[:, d:])
 
     # ---- B-step (update gene coefficients) ----
-    g = grad(Y, A, B, family, nuisance, thres_disp)
+    g = grad_genes(Y, A, B, family, nuisance, thres_disp)
     if P1 is not None:
         g[:, :d] = 0.
     elif P2 is not None:
@@ -201,7 +201,7 @@ def update_with_mask(Y, A, B, d, lam, P1, P2,
 
     if P2 is None:
         B[:, d:] = np.clip(B[:, d:], -10., 10.)
-    func_val = nll(Y, A, B, family, nuisance, Ys, thres_disp)
+    func_val = nll_mat(Y, A, B, family, nuisance, Ys, thres_disp)
 
     return func_val, A, B
 
@@ -376,7 +376,7 @@ def alter_min(
     cell_active = np.ones(n, dtype=np.bool_)
 
     t = 0
-    func_val_pre = (nll(Y, A, B, family, nuisance, Ys, thres_disp) + np.sum(np.abs(B[:,d-a:d]) * weights)) / p
+    func_val_pre = (nll_mat(Y, A, B, family, nuisance, Ys, thres_disp) + np.sum(np.abs(B[:,d-a:d]) * weights)) / p
     func_val = func_val_pre
 
     # ---- Sparse-gene B-only warm-up (G6) ----
@@ -394,7 +394,7 @@ def alter_min(
         # objective.  Without this, the first main-loop iteration's improvement
         # appears to include all of the warm-up's NLL drop (creating a one-step
         # cliff in the hist plot and misattributing the warm-up gain).
-        func_val_pre = (nll(Y, A, B, family, nuisance, Ys, thres_disp) + np.sum(np.abs(B[:,d-a:d]) * weights)) / p
+        func_val_pre = (nll_mat(Y, A, B, family, nuisance, Ys, thres_disp) + np.sum(np.abs(B[:,d-a:d]) * weights)) / p
         func_val = func_val_pre
 
     kwargs_ls['alpha'] = kwargs_ls['alpha']

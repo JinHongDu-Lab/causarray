@@ -1,5 +1,5 @@
 ---
-title: "Joint Pertub-seq perturbations analysis"
+title: "Perturb-seq analysis (R)"
 output:
   md_document:
     variant: markdown_github+tex_math_dollars
@@ -12,15 +12,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Perturb-seq Tutorial (R)
 
-The original data of Jin et al 2020 can be downloaded from the Broad single cell portal (https://singlecell.broadinstitute.org/single_cell/study/SCP1184).
-Here, we just use a subset of the data to demonstrate the workflow of the analysis.
+This tutorial uses an excitatory-neuron subset from [Jin et al. (2020), *Science*](https://doi.org/10.1126/science.aaz6063), which studied gene perturbations in the developing mouse brain. Data are available from the [Broad Single Cell Portal](https://singlecell.broadinstitute.org/single_cell/study/SCP1184).
 
-
+The workflow is **prepare counts and treatment indicators → fit latent factors → check propensity support and refit where it fails → estimate log-fold changes**. Support is checked before the effects are read, because an arm whose weights concentrate can report a discovery count that reflects the weights rather than the biology. Saved outputs illustrate one run; counts and rankings may change after refitting.
 
 ```{r}
 library(Seurat)
 
-sc.seurat <- readRDS("perturbseq-exneu.rds")
+sc.seurat <- readRDS("data/perturbseq-exneu.rds")
 
 # Access the counts through Seurat when its installed version recognizes the
 # serialized Assay5 object; otherwise recover the same layer and dimnames
@@ -46,19 +45,11 @@ A <- data.frame(
 colnames(A) <- sub("^trt_", "", colnames(A))
 ```
 
-For running causarray, we require the following inputs:
+## Prepare inputs
 
-- `Y`: the cell-by-gene gene expression matrix.
-- `A`: the cell-by-condition binary matrix of the perturbation/treatment conditions.
-- `X, X_A`: (optional) the cell-by-covariate matrix of the covariates of interest for outcome and propensity models.
+Use `Y` for cell-by-gene counts, `A` for perturbation indicators, and `X`/`X_A` for outcome/propensity covariates. GFP control cells have all-zero treatment indicators. `prep_causarray_data` prepares the designs, including an intercept and log-library size in the propensity model.
 
-Here, `Y` and `A` can be dataframes.
-
-
-
-Use R package `reticulate` to load the Python package `causarray`. Render this
-tutorial from the `causarray-r` environment defined by `environment-r.yaml`;
-reticulate then connects to the NumPy-2-based Python `causarray` environment.
+Use `reticulate` to call the Python package from R. The R environment is defined in `environment-r.yaml`; `use_condaenv` selects the Python environment.
 
 ```{r}
 require(reticulate)
@@ -75,12 +66,14 @@ list2env(dat, .GlobalEnv)
 ```
 
 
-We first apply gcate to estimate unmeasured confounders.
+## Estimate latent factors
+
+This example uses a fixed illustrative rank, matching the Python fitting cell. Inspect the JIC curve and nearby ranks in the Python example before changing it. GCATE factors represent shared expression variation; their interpretation as confounders depends on the model assumptions.
 
 ```{r}
 r <- 10
-# Same early-stopping settings as the Python tutorial, so both produce
-# identical latent factors on this dataset.
+# Use the same early-stopping settings as the Python example.
+# Equivalent results also require matching inputs and package versions.
 res_gate <- causarray$fit_gcate(
   Y, X, A, r, verbose = TRUE,
   kwargs_es_1 = list(rel_tol = 2e-4, max_iters = 30L),
@@ -94,28 +87,11 @@ cat(sprintf("Step 2 -- epochs: %d, best NLL: %.6f\n",
             as.integer(res_gate[[2]]$n_iter), min(unlist(res_gate[[2]]$hist))))
 ```
 
-Next, we apply causarray to estimate the causal effects of perturbations on gene expression. Since causarray 0.0.10, `LFC` uses the influence-function variance of the AIPW estimator for every design (the former `usevar` choice between pooled and Welch variances is gone; see the LFC documentation), with calibrated propensity scores and a model-based variance floor. The 106 GFP control cells and the perturbation groups (median 89 cells) are similar in size, so the calibrated scores coincide almost exactly with the class-balanced scores used in earlier versions of this tutorial and the results are essentially unchanged.
+### Treatment-association diagnostics
 
-```{r}
-offsets <- log(res_gate[[2]][['kwargs_glm']][['size_factor']]) # use the precomputed size factors
-res <- causarray$LFC(Y, cbind(X, U), A, cbind(X_A, U), offset=offsets, verbose=TRUE)
-```
+The summary compares each perturbation with shared controls using Spearman correlations and standardized mean differences. P-values are BH-adjusted across treatment–covariate pairs by default. Association alone does not identify a confounder or justify removing a covariate.
 
-```{r}
-names(res) <- c("df_res", "estimation")
-list2env(res, .GlobalEnv)
-```
-
-## Diagnose treatment associations and overlap
-
-Positivity requires treated and control cells with comparable covariates. The
-propensity design holds the observed covariates built by `prep_causarray_data`
-(the intercept and standardized log-library size) together with the estimated
-latent factors. The association summary compares each perturbation with the
-shared all-zero GFP controls, BH-adjusting across every treatment-by-covariate
-pair; pass `bh_scope = "per_treatment"` to adjust within each treatment
-instead. These are diagnostics only — association alone is not a reason to drop
-an observed covariate.
+Library size and latent factors are derived from the measured transcriptome and may reflect perturbation responses as well as technical variation. Their causal role requires scientific justification. Factor labels refer to this fit; they need not retain the same meaning after refitting.
 
 ```{r association-diagnostics}
 W_A <- cbind(X_A, U)
@@ -165,22 +141,17 @@ knitr::asis_output(
 )
 ```
 
-We next estimate five-fold out-of-fold (OOF) scores with the same calibrated
-logistic model `LFC` uses internally by default since causarray 0.0.10; *out-of-fold* means each cell is scored by
-a model that was not trained on it. The overlap ratio is descriptive rather than
-a hard pass/fail threshold, though **0.25 is a reasonable rule-of-thumb floor**.
-The table also reports the fraction of scores outside `[0.05, 0.95]`, the
-effective sample size (ESS) of the inverse-probability weights — a fraction
-between 0 and 1 where larger is better — and the Brier score. These scores are
-raw, so we pass `clip_bounds = NULL` and `clipped_fraction` comes back as `NA`
-instead of a misleading zero.
+### Propensity-score diagnostics and refit
 
-Formally, ESS is Kish's effective sample size of the inverse-probability weights:
+Read this before the effects: an arm whose weights concentrate on a few cells reports a discovery count that reflects the weights rather than the biology. Estimate five-fold out-of-fold logistic scores, where each cell's treatment label is held out of its propensity fit. The latent factors were estimated using the full dataset, so this is conditional validation of the propensity model, not cross-fitting of the entire workflow. Unweighted logistic fits match the model class used by default in `LFC`; they do not guarantee calibrated probabilities.
 
-$$\mathrm{ESS} = \frac{\left(\sum_i w_i\right)^2}{\sum_i w_i^2}, \qquad w_i = \begin{cases} 1/\hat{\pi}_i & \text{treated cells} \\ 1/(1-\hat{\pi}_i) & \text{control cells,} \end{cases}$$
+The table reports histogram overlap, scores outside the display interval `[0.05, 0.95]`, Brier prediction error, and inverse-weight effective sample size (ESS). There is no universal overlap cutoff. For weights $w_i$, Kish's ESS is
 
-where $\hat{\pi}_i = P(\text{treated} \mid X_i)$ is the propensity score. Equal weights give
-$\mathrm{ESS}=n$ (fraction 1); a few dominant weights push it toward 0.
+$$\mathrm{ESS} = \frac{(\sum_i w_i)^2}{\sum_i w_i^2},$$
+
+using $1/\hat\pi_i$ for treated cells and $1/(1-\hat\pi_i)$ for controls. A low ESS fraction indicates concentrated weights. Inspect both arms; neither a high ESS nor greater score overlap establishes adequate confounding adjustment. See [Cole and Hernán](https://doi.org/10.1093/aje/kwn164) for discussion of weighting assumptions and diagnostics.
+
+Pass `clip_bounds = NULL` for these raw scores; clipping cannot be inferred from their values alone.
 
 ```{r propensity-diagnostics}
 pi_oof <- causarray$estimate_propensity_scores(
@@ -208,24 +179,92 @@ knitr::asis_output(
 )
 ```
 
-Satb2 has the weakest overlap: its latent-factor diagnostics flag both U8 and
-U9, and standardized log-library size is strongly associated with it as well.
-Propensity scores are fit one treatment at a time against the shared controls,
-so you can change the model for Satb2 alone and leave the other 28
-perturbations untouched. `refit_propensity_scores` refits only the treatments
-you name and returns an audit table next to the updated scores. Four
-alternatives:
 
-- **drop U9** — remove the single most imbalanced latent factor;
-- **drop U8** — remove the other flagged latent factor instead;
-- **10x library penalty** — keep every covariate, but apply ten times the usual
-  L2 penalty to standardized log-library size;
-- **Satb2 C=0.1** — keep every covariate and shrink all of them more strongly.
+### Tuning the library-size penalty
 
-Out-of-fold scores drive the overlap diagnostics; the analysis scores then
-reuse the primary fit's cached `Y_hat`, so no outcome model is refitted.
+`prep_causarray_data` appends standardized log library size to `X_A`. For a few perturbations it differs enough between the perturbed and control cells that the propensity model can tell them apart almost perfectly. Measured library size mixes capture depth with total RNA content, and these data do not identify which of the two drives a given arm's shift, so how much to adjust for it is a modelling choice rather than a settled one.
 
-```{r satb2-sensitivity}
+`tune_penalty_factor` penalizes **that coefficient alone**, and only for arms failing a pre-specified support check. Dropping the covariate is the infinite-penalty limit, so it bounds what any finite factor can achieve: the search evaluates that endpoint first, then returns the smallest factor meeting the target. The report shows both, so the penalty can be read against the limit rather than on its own.
+
+Choose the target to match the failure. These arms lose histogram overlap while keeping most of their treated sample, so overlap is the target; a screen whose arms instead lose effective sample would target that.
+
+```{r penalty-tuning}
+pi_before <- causarray$estimate_propensity_scores(
+  A, W_A, K = 1L, C = 1.0, class_weight = NULL, clip = NULL, random_state = 0L
+)
+tuned <- causarray$tune_penalty_factor(
+  A, W_A, "log_library_size",
+  covariate_names = propensity_names,
+  trigger = list(auc_gt = 0.9, ess_treated_fraction_lt = 0.5),
+  target = list(overlap_ratio_gt = 0.3),
+  K = 1L, C = 1.0, class_weight = NULL, random_state = 0L
+)
+penalty_factors <- tuned[[1]]
+tuning_report <- tuned[[2]]
+tuning_report[order(-tuning_report$penalty_factor), c(
+  "treatment", "penalty_factor", "feasible", "n_fits",
+  "overlap_ratio_unpenalized", "overlap_ratio_chosen",
+  "overlap_ratio_dropped", "auc_unpenalized", "auc_chosen"
+)]
+```
+
+```{r penalty-refit}
+refit <- causarray$refit_propensity_scores(
+  A, W_A, pi_hat = pi_before, covariate_names = propensity_names,
+  penalty_factors_by_treatment = penalty_factors,
+  K = 1L, C = 1.0, class_weight = NULL, clip = NULL, random_state = 0L
+)
+pi_after <- refit[[1]]
+
+support_after <- causarray$summarize_propensity_scores(
+  A, pi_after, clip_bounds = NULL
+)
+support_after <- support_after[support_after$treatment %in% names(penalty_factors), c(
+  "treatment", "overlap_ratio", "auc", "ess_treated_fraction"
+)]
+support_after
+
+tuned_plot <- causarray$plot_propensity_scores(
+  A, pi_after, treatments = as.list(weakest), clip_bounds = NULL
+)
+invisible(tuned_plot[[1]]$suptitle(
+  "After: library size penalized on flagged arms only", y = 1.02
+))
+tuned_plot[[1]]$savefig(
+  "perturbseq-r_files/figure-markdown_github/propensity-overlap-tuned-1.png",
+  dpi = 120L, bbox_inches = "tight"
+)
+knitr::asis_output(
+  "![](perturbseq-r_files/figure-markdown_github/propensity-overlap-tuned-1.png)"
+)
+```
+
+### Estimate log-fold changes
+
+`LFC` combines outcome predictions and propensity scores to estimate adjusted log-fold changes. Reuse the GCATE size factors so both stages use the same normalization. Inference uses the AIPW influence-function variance with small-sample adjustments and a size-factor-aware Poisson variance floor; see the `LFC` documentation for details.
+
+```{r}
+offsets <- log(res_gate[[2]][['kwargs_glm']][['size_factor']]) # use the precomputed size factors
+# pi_hat carries the tuned propensity from the section above, so the estimate
+# and the diagnostics describe the same scores.
+res <- causarray$LFC(Y, cbind(X, U), A, W_A, offset = offsets,
+                     pi_hat = pi_after, verbose = TRUE)
+```
+
+```{r}
+names(res) <- c("df_res", "estimation")
+list2env(res, .GlobalEnv)
+```
+
+### Covariate filtering for one treatment
+
+The tuner above adjusts how strongly one coefficient is penalized. `refit_propensity_scores` can also remove a covariate from a single treatment's propensity design, which is a different operation: a penalty shrinks a coefficient the data cannot support, whereas dropping asserts the covariate does not belong in that model.
+
+Satb2 is used here to show the mechanics: remove U9 or U8, raise the library-size penalty, or shrink every coefficient with a smaller `C`. These are illustrative settings for reading the audit output, not candidates to choose among by discovery count; recheck factor associations after refitting.
+
+Only Satb2's scores change. Out-of-fold fits supply the diagnostics, while separate in-sample fits supply the variant LFC estimates using the primary fit's cached outcome predictions. Removing a factor here does not remove it from the outcome model.
+
+```{r satb2-filtering}
 satb2_variants <- list(
   `drop U9` = list(drop_by_treatment = list(Satb2 = "U9")),
   `drop U8` = list(drop_by_treatment = list(Satb2 = "U8")),
@@ -294,7 +333,7 @@ satb2_all <- subset(
 )
 names(satb2_all)[-1] <- c("tau_all", "padj_all")
 
-sensitivity_summary <- do.call(rbind, lapply(names(satb2_variants), function(name) {
+variant_summary <- do.call(rbind, lapply(names(satb2_variants), function(name) {
   analysis <- refit_satb2(estimation[["pi_hat_raw"]], 1L, satb2_variants[[name]])
   fit <- causarray$LFC(
     Y, cbind(X, U), A, W_A,
@@ -312,69 +351,21 @@ sensitivity_summary <- do.call(rbind, lapply(names(satb2_variants), function(nam
     discoveries = sum(merged$padj < 0.1, na.rm = TRUE)
   )
 }))
-sensitivity_summary$discoveries_all <- sum(satb2_all$padj_all < 0.1, na.rm = TRUE)
-sensitivity_summary
+variant_summary$discoveries_all <- sum(satb2_all$padj_all < 0.1, na.rm = TRUE)
+variant_summary
 
-baseline_overlap <- subset(satb2_overlap, model == "all factors")
-u9_overlap <- subset(satb2_overlap, model == "drop U9")
-u8_overlap <- subset(satb2_overlap, model == "drop U8")
-penalty_overlap <- subset(satb2_overlap, model == "10x library penalty")
-ridge_overlap <- subset(satb2_overlap, model == "Satb2 C=0.1")
-u9_effects <- subset(sensitivity_summary, model == "drop U9")
-u8_effects <- subset(sensitivity_summary, model == "drop U8")
-penalty_effects <- subset(sensitivity_summary, model == "10x library penalty")
-ridge_effects <- subset(sensitivity_summary, model == "Satb2 C=0.1")
+
 ```
 
-**What the four variants show.** Which factor you drop matters, and neither
-single drop is the answer.
+### Reading the filtering comparison
 
-Dropping U9 — the single most imbalanced factor — does essentially nothing:
-overlap barely moves (`r sprintf("%.3f", baseline_overlap$overlap_ratio)` to
-`r sprintf("%.3f", u9_overlap$overlap_ratio)`, still below the 0.25 floor, so it
-does not fix the problem) and the effects are unchanged (correlation
-`r sprintf("%.3f", u9_effects$effect_correlation)`). Dropping U8 instead looks
-like a win — overlap jumps to `r sprintf("%.3f", u8_overlap$overlap_ratio)` — but
-it guts the control effective sample size, from
-`r sprintf("%.1f%%", 100 * baseline_overlap$ess_control_fraction)` to
-`r sprintf("%.1f%%", 100 * u8_overlap$ess_control_fraction)`, and destabilises the
-effects (correlation `r sprintf("%.3f", u8_effects$effect_correlation)`,
-discoveries `r format(u8_effects$discoveries, big.mark = ",", trim = TRUE)`); a
-high overlap ratio bought this way is misleading, because the estimate now rests
-on almost no effective controls. That collapse is a weight problem: dropping U8
-pushes a few control cells to propensity scores near 1, so their $1/(1-\hat{\pi}_i)$
-control weights become extreme and a handful of controls dominate the arm. So the
-message is *not* "drop U9, keep U8":
-dropping U9 fixes nothing and dropping U8 does real damage. Factor-dropping is the
-wrong tool here — keep all the factors and regularise instead.
+The saved examples show that removing a factor can reduce control ESS even when histogram overlap improves. Stronger penalties give less concentrated weights, but their out-of-fold Brier scores are worse. The effect estimates remain broadly correlated with the primary fit, while some discovery decisions change.
 
-Penalising the propensity model is reliable. The feature-specific 10x
-library-size penalty (overlap `r sprintf("%.3f", penalty_overlap$overlap_ratio)`)
-and, more simply, global `C = 0.1` both raise overlap above the 0.25 rule of thumb
-and in line with the other perturbations. `C = 0.1` reaches
-`r sprintf("%.3f", ridge_overlap$overlap_ratio)`, leaves only
-`r sprintf("%.1f%%", 100 * ridge_overlap$outside_overlap_fraction)` of scores
-outside `[0.05, 0.95]`, and keeps the effective sample sizes healthy (control
-`r sprintf("%.1f%%", 100 * ridge_overlap$ess_control_fraction)`, treated
-`r sprintf("%.1f%%", 100 * ridge_overlap$ess_treated_fraction)`) while the effects
-stay stable (correlation `r sprintf("%.3f", ridge_effects$effect_correlation)`).
-The only real cost is a modest rise in the out-of-fold Brier score, from
-`r sprintf("%.3f", baseline_overlap$brier_score)` to
-`r sprintf("%.3f", ridge_overlap$brier_score)`.
+That is a tradeoff, not evidence that one variant is more trustworthy. Read prediction, weight concentration, and effect stability together, and do not pick a design to raise overlap or discovery counts. Keep factor removal for cases with a scientific reason to change the adjustment set, and re-examine the pattern in a new run rather than carrying a fixed `C` across datasets.
 
-For a small treatment (51 cells) this is a good trade. A penalised model
-deliberately accepts a little bias in return for propensity scores that are less
-variable and better supported, which makes the downstream estimate more
-trustworthy — exactly the overlapping, in-range scores reviewers ask for. The
-drop in discoveries (`r format(ridge_effects$discoveries_all, big.mark = ",", trim = TRUE)`
-to `r format(ridge_effects$discoveries, big.mark = ",", trim = TRUE)`) is not a
-loss: a conservative, well-supported list is the goal, not the largest one.
+## Discovery summary
 
-In practice, applying `C = 0.1` to every perturbation is a sensible default. It
-gives up a little power on the well-behaved perturbations but spares you from
-hand-tuning the few problem cases like Satb2 — a good bargain when you have many
-analyses to run.
-
+The plot reports genes passing the chosen BH-adjusted threshold for each perturbation. Counts describe this fit and can change across runs.
 
 ```{r, fig.width=12, fig.height=6}
 library(dplyr)

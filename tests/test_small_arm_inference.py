@@ -1,8 +1,5 @@
 """
-Stage 0 tests for the 0.1.0 inference fix.
-
-They pin the behaviour that the SCARF investigation showed was wrong before
-0.1.0:
+Inference for small perturbation arms that share a large control pool:
 
 (a) the reported standard error matches the estimator's true sampling SD
     under an oracle outcome model, for rare and common treatments;
@@ -281,7 +278,7 @@ def test_auto_expression_threshold_scales_with_smaller_arm():
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             df, _ = LFC(Y, np.ones((n, 1)), A, family='poisson', offset=False, backend='fast',
-                        thres_diff=0)          # isolate thres_min from the mean-difference filter
+                        thres_diff=0)
         sparse = df.iloc[10:]
         tested = np.isfinite(sparse['std']).mean()
         assert (tested > 0.5) == expect_tested, f'n1={n1}: tested fraction {tested:.2f}'
@@ -318,3 +315,27 @@ def test_threshold_uses_observed_support_not_model_means():
     assert df.loc[2, 'estimable'] and df.loc[2, 'var_floored'], 'complete knockout must stay estimable at the floor'
     assert df.loc[2, 'padj'] < 0.05 and df.loc[2, 'tau'] < -3
     assert df.loc[3, 'padj'] < 0.05 and df.loc[3, 'tau'] < -3
+
+
+def test_equal_arm_means_are_tested_and_counted_in_bh():
+    """Genes whose arm means barely differ stay in the BH family.
+
+    Excluding them (the former ``|mean_1 - mean_0| < thres_diff`` filter)
+    selects on the effect estimate: it drops exactly the p-values near 1, so
+    BH over the remaining genes becomes anti-conservative.
+    """
+    rng = np.random.default_rng(11)
+    n0, n1, p = 2000, 200, 40
+    n = n0 + n1
+    A = np.r_[np.zeros(n0), np.ones(n1)]
+    Y = _nb_counts(rng, np.full((n, p), 2.0), 4.0)
+    Y[:, 0] = 2.0                               # identical arm means
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        df, _ = LFC(Y, np.ones((n, 1)), A, family='poisson', offset=False,
+                    backend='fast', ps_clip=None)
+    assert np.isfinite(df['std']).all()
+    assert df.loc[0, 'tau'] == pytest.approx(0.0, abs=1e-12)
+    assert df.loc[0, 'pvalue'] == pytest.approx(1.0, abs=1e-6)
+    # every gene is part of the BH family
+    assert df['padj'].notna().all()

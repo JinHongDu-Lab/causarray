@@ -446,13 +446,13 @@ class TestLFCIntegration:
         fdr = (df['padj'] < 0.05).mean()
         assert fdr <= 0.10, f"Imbalanced type I error too high: FDR={fdr:.3f}"
 
-    # ---- I13: 'unequal' is a deprecated alias of 'pooled' (0.1.0) ----
+    # ---- I13: 'unequal' is a deprecated alias of 'pooled' ----
     def test_unequal_is_alias_of_pooled(self, null_nb_imbalanced):
         """I13 — usevar='unequal' warns and returns exactly the pooled result."""
         Y, W, A, _, _ = null_nb_imbalanced
         df_pooled, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                            usevar='pooled', backend='fast')
-        with pytest.warns(FutureWarning, match="removed in 0.1.0"):
+        with pytest.warns(FutureWarning, match="deprecated and treated as 'pooled'"):
             df_alias, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                               usevar='unequal', backend='fast')
         pd.testing.assert_frame_equal(df_alias, df_pooled)

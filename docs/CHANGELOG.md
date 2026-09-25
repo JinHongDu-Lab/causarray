@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.1]
+
+### Fixed
+
+- `LFC` no longer excludes genes whose arm means differ by less than
+  `thres_diff`, which is now only the floor before the logarithm. The filter
+  selected on the effect estimate: it dropped the pairs with p-values near 1
+  (about 10% of expressed pairs on a Perturb-seq negative control), so BH over
+  the remaining pairs was anti-conservative.
+
 ## [0.1.0]
 
 Inference fix for small perturbation arms, and the GLM engine moves to crispyx

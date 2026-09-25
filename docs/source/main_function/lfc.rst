@@ -34,7 +34,7 @@ memory when loaded.
 Choosing the variance estimator
 -------------------------------
 
-Since 0.1.0 ``LFC`` uses ``usevar='pooled'``, the influence-function
+``LFC`` uses ``usevar='pooled'``, the influence-function
 (sandwich) variance ``var(eta)/n`` of the AIPW estimator, where ``eta`` are the
 per-cell influence values of the log-ratio and ``n`` counts every cell that
 enters the estimand. With calibrated propensity scores this equals the
@@ -61,23 +61,20 @@ Two further safeguards apply to every gene:
   significant while a genuine complete knockout (``tau`` of -5 or more) still
   is. The ``var_floored`` column marks affected pairs and ``std_raw`` reports
   the pre-floor standard error.
-* **Expression threshold.** ``thres_min='auto'`` (default since 0.1.0)
-  requires about ``min_counts`` (5) expected counts in the smaller arm, i.e. a
-  larger-arm mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a
-  100-cell arm, 0.007 for a 700-cell arm. A fixed float can be passed
-  instead.
+* **Expression threshold.** ``thres_min='auto'`` (default) requires about
+  ``min_counts`` (5) expected counts in the smaller arm, i.e. a larger-arm
+  mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a 100-cell
+  arm, 0.007 for a 700-cell arm. A fixed float can be passed instead. The
+  threshold looks only at expression level, never at the difference between
+  arms: filtering on the estimated effect would drop the pairs with p-values
+  near 1 and make the BH correction over the rest anti-conservative.
 
-``usevar='unequal'`` (the 0.0.6-0.0.9 default) applied a two-sample Welch
-formula ``s0²/n0 + s1²/n1`` by arm. That is not the variance of an estimator
-that averages pseudo-outcomes over all cells: for equal arm sizes it is exactly
-twice the correct standard error, and for a rare treatment fitted with
-class-balanced propensity scores it is an order of magnitude too large, so
-real effects were estimated but not called. It was removed in 0.1.0 after
-re-validation on the Perturb-seq, SEA-AD and Adamson tutorials; the argument
-is accepted as an alias of ``'pooled'`` with a ``FutureWarning`` for one
-release. Neither estimator models within-donor correlation; repeated cells
-from one biological unit should still be pseudo-bulked or analysed with a
-cluster-aware method.
+``usevar='unequal'`` is a deprecated alias of ``'pooled'``. The by-arm Welch
+formula ``s0²/n0 + s1²/n1`` it used to select is not the variance of an
+estimator that averages pseudo-outcomes over all cells: it doubles the standard
+error for equal arms and inflates it far more for rare treatments. Neither
+formula models within-donor correlation; repeated cells from one biological
+unit should still be pseudo-bulked or analysed with a cluster-aware method.
 
 Propensity diagnostics
 ----------------------
@@ -88,21 +85,20 @@ overfitting diagnostics.  :func:`summarize_propensity_scores` reports overlap,
 tail mass, and inverse-weight effective sample size, while
 :func:`plot_propensity_scores` compares treatment and control distributions.
 
-Since 0.1.0 both the standalone estimator and ``LFC`` fit calibrated
-logistic propensity scores by default (``class_weight=None``), which is what
-the AIPW weights ``A/pi`` require. The former ``'balanced'`` default centred
-the scores near 0.5 whatever the prevalence; for a treatment with 0.6%
-prevalence that shrank the AIPW correction term by roughly twice the
-prevalence and turned the estimator into an outcome-model plug-in whose
-uncertainty the influence function no longer reflected. ``'balanced'`` remains
-available to reproduce earlier analyses. Because in-sample logistic fits with
+Both the standalone estimator and ``LFC`` fit calibrated logistic propensity
+scores by default (``class_weight=None``), which is what the AIPW weights
+``A/pi`` require. ``class_weight='balanced'`` centres the scores near 0.5
+whatever the prevalence; for a treatment with 0.6% prevalence that shrinks the
+AIPW correction term by roughly twice the prevalence and turns the estimator
+into an outcome-model plug-in whose uncertainty the influence function no
+longer reflects. Because in-sample logistic fits with
 ~100 cases against thousands of controls overstate separation, use out-of-fold
 scores (``K=5``) when judging overlap.
 
 Propensity scores used by AIPW are clipped with a prevalence-aware bound by
 default (``ps_clip='auto'``: ``lower = min(0.01, prevalence/10)`` per
-treatment, and symmetrically above). The fixed ``(0.01, 0.99)`` used before
-0.1.0 clipped every calibrated score of a treatment with prevalence below 1%.
+treatment, and symmetrically above). A fixed ``(0.01, 0.99)`` would clip every
+calibrated score of a treatment with prevalence below 1%.
 The resolved bounds are returned as ``estimation['ps_clip_bounds']`` and the
 raw scores as ``estimation['pi_hat_raw']``.
 
@@ -116,13 +112,12 @@ Small perturbation arms
 -----------------------
 
 Screens with fewer than ~200 cells per perturbation and thousands of shared
-controls are the regime in which the pre-0.1.0 defaults failed (SCARF
-tutorial, "Investigation" section): 83% of discoveries were genes with zero
-counts in the perturbed arm, and real effects had t-statistics halved by the
-Welch formula. In this regime inspect the ``count_treated`` and
-``var_floored`` columns, keep the default expression threshold, and expect a
-``RuntimeWarning`` listing how many pairs the variance floor
-bound.
+controls are where chance all-zero arms and sparse genes matter most. In this
+regime inspect the ``count_treated`` and ``var_floored`` columns, and expect a
+``RuntimeWarning`` listing how many pairs the variance floor bound. A
+negative control is cheap: label random subsets of control cells as fake
+perturbations of the real arm sizes and run ``LFC`` on them. If its false
+discoveries concentrate in sparse genes, raise ``min_counts`` (e.g. to 20).
 
 Treatment-specific covariate diagnostics
 ----------------------------------------

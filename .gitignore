@@ -190,7 +190,7 @@ docs/source/tutorial/replogle/results/**
 # Unrelated tutorial directory (not part of causarray package docs)
 docs/source/tutorial/scp/
 
-# SCARF tutorial is currently a local analysis and is not part of the
+# Mouse-brain Perturb-seq analysis is currently local and is not part of the
 # committed documentation (it is absent from docs/source/index.rst).
-# Regenerate with the numbered scripts + SCARF-py.ipynb.
-/docs/source/tutorial/SCARF/
+# Regenerate with pipeline.py + L45Glut-py.ipynb.
+/docs/source/tutorial/mouse_brain/

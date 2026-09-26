@@ -12,6 +12,8 @@ Inference for small perturbation arms that share a large control pool:
     propensity weighting;
 (f) the prevalence-aware clip does not clip calibrated scores of a rare
     treatment wholesale, and the support columns report raw counts.
+(g) size factors follow sequencing depth, so highly expressed genes do not
+    shift together when random arms differ in average depth.
 """
 
 import warnings
@@ -339,3 +341,57 @@ def test_equal_arm_means_are_tested_and_counted_in_bh():
     assert df.loc[0, 'pvalue'] == pytest.approx(1.0, abs=1e-6)
     # every gene is part of the BH family
     assert df['padj'].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# (g) size factors follow sequencing depth
+# ---------------------------------------------------------------------------
+
+def test_default_size_factors_track_depth_and_resist_composition():
+    """The default median of ratios uses well-expressed genes: it follows
+    sequencing depth in sparse data and ignores a shift in a minority of genes."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(12)
+    n = 400
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(150, 5.0), np.full(850, 0.2)]
+    Y = rng.poisson(depth[:, None] * mu[None, :]).astype(float)
+    log_depth = np.log(depth) - np.log(depth).mean()
+    assert np.corrcoef(np.log(comp_size_factor(Y)), log_depth)[0, 1] > 0.95
+    assert np.corrcoef(np.log(comp_size_factor(Y, min_mean=0)), log_depth)[0, 1] < 0.9
+    # a 4x increase in 20% of the expressed genes in half the cells
+    Y2 = Y.copy()
+    Y2[:n // 2, :30] = rng.poisson(4 * depth[:n // 2, None] * 5.0)
+    shift = np.log(comp_size_factor(Y2))[:n // 2].mean() - np.log(comp_size_factor(Y2))[n // 2:].mean()
+    libsize_shift = (np.log(comp_size_factor(Y2, method='libsize'))[:n // 2].mean()
+                     - np.log(comp_size_factor(Y2, method='libsize'))[n // 2:].mean())
+    assert abs(shift) < abs(libsize_shift)
+    Y2[3] = 0.0
+    assert comp_size_factor(Y2)[3] == 0.0
+
+
+def test_highly_expressed_genes_do_not_shift_with_arm_depth():
+    """Random arms differ in average depth by chance. With median-of-ratios
+    size factors over every gene, most of that depth stays in highly expressed
+    genes and moves all of them together, one shared shift per arm; the
+    default, which uses well-expressed genes only, removes it."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(0)
+    n0, n1, a, n_high = 1500, 130, 12, 300
+    n = n0 + n1 * a
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(n_high, 5.0), np.full(700, 0.3)]
+    Y = rng.poisson(depth[:, None] * mu[None, :] * rng.gamma(10, 0.1, (n, mu.size))).astype(float)
+    A = np.zeros((n, a))
+    for k in range(a):
+        A[n0 + k * n1:n0 + (k + 1) * n1, k] = 1
+    shift = {}
+    for label, min_mean in (('default', 2.0), ('all genes', 0.0)):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            df, _ = LFC(Y, np.ones((n, 1)), A, np.ones((n, 1)), family='nb', backend='fast',
+                        offset=np.log(comp_size_factor(Y, min_mean=min_mean)))
+        z = df['stat'].to_numpy().reshape(a, -1)[:, :n_high]
+        shift[label] = np.nanstd(np.nanmean(z, axis=1))
+    assert shift['default'] < 0.2, shift
+    assert shift['all genes'] > 2 * shift['default'], shift

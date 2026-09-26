@@ -61,6 +61,11 @@ Two further safeguards apply to every gene:
   significant while a genuine complete knockout (``tau`` of -5 or more) still
   is. The ``var_floored`` column marks affected pairs and ``std_raw`` reports
   the pre-floor standard error.
+* **Size factors.** ``offset=True`` uses median-of-ratios size factors
+  computed over genes with mean count of at least 2 (``min_mean``). Ratios
+  of sparse genes, whose counts are mostly 1 or 2, miss much of each cell's
+  sequencing depth; the leftover depth then moves every highly expressed
+  gene of an arm together and inflates their null statistics.
 * **Expression threshold.** ``thres_min='auto'`` (default) requires about
   ``min_counts`` (5) expected counts in the smaller arm, i.e. a larger-arm
   mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a 100-cell

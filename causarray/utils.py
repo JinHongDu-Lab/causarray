@@ -176,7 +176,8 @@ def _normalize(counts, log_geo_means):
     return np.median(diff[mask])
 
 
-def comp_size_factor(counts, method='geomeans', lib_size=1e4, **kwargs):
+def comp_size_factor(counts, method='geomeans', lib_size=1e4, min_mean=2.0,
+                     min_genes=100, **kwargs):
     '''
     Compute the size factors of the rows of the count matrix.
 
@@ -185,15 +186,80 @@ def comp_size_factor(counts, method='geomeans', lib_size=1e4, **kwargs):
     counts : array-like
         The input raw count matrix.
     method : str
-        The method to compute the size factors, 'geomeans' or 'scale'.
+        ``'geomeans'`` (default): median of each row's log-ratios to the
+        per-gene geometric means, over the row's nonzero counts in genes
+        with mean count at least ``min_mean``. ``'libsize'``: each row's
+        total count. ``'scale'``: ``lib_size`` divided by the column sums.
     lib_size : float
         The desired library size after normalization for 'scale'.
-    
+    min_mean : float
+        For ``'geomeans'``, genes with a mean count below this are left out
+        of the ratios; if fewer than ``min_genes`` genes pass, the
+        ``min_genes`` genes with the highest mean are used. ``0`` uses every
+        gene.
+    min_genes : int
+        Minimum number of genes used by ``'geomeans'``.
+
     Returns
     -------
     size_factor : array-like
-        The size factors of the rows.
+        The size factors of the rows, with geometric mean one for
+        ``'geomeans'`` and ``'libsize'``. A row without counts gets zero.
+
+    Notes
+    -----
+    The median of ratios resists composition changes: a perturbation or a
+    latent factor that moves a minority of genes does not move the size
+    factor. In sparse single-cell data, however, most nonzero counts are 1 or
+    2, and their ratios capture only part of each cell's sequencing depth.
+    The remainder stays in highly expressed genes, which scale fully with
+    depth, and shifts all of them together whenever two groups of cells
+    differ in average depth by chance; their test statistics are then too
+    spread under the null. Restricting the ratios to genes with enough counts
+    keeps the median's robustness while tracking depth.
+
+    .. versionchanged:: 0.1.1
+        ``'geomeans'`` uses genes with mean count at least ``min_mean``
+        (previously every gene); ``'libsize'`` added.
     '''
+    counts = np.asarray(counts, dtype=np.float64)
+    if method == 'libsize':
+        totals = counts.sum(axis=1)
+        positive = totals > 0
+        size_factor = np.zeros_like(totals)
+        if positive.any():
+            log_totals = np.log(totals[positive])
+            size_factor[positive] = np.exp(log_totals - np.mean(log_totals))
+        return size_factor
+    if method == 'geomeans':
+        gene_mean = counts.mean(axis=0)
+        keep = gene_mean >= min_mean
+        if keep.sum() < min(min_genes, counts.shape[1]):
+            keep = np.zeros(counts.shape[1], dtype=bool)
+            keep[np.argsort(gene_mean)[::-1][:min_genes]] = True
+        keep &= gene_mean > 0
+
+        def _log_median_ratio(sub):
+            log_sub = np.where(sub > 0, np.log(np.where(sub > 0, sub, 1.0)), np.nan)
+            log_geo_means = np.nanmean(log_sub, axis=0)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)   # all-NaN rows
+                return np.nanmedian(log_sub - log_geo_means[None, :], axis=1)
+
+        log_size_factor = _log_median_ratio(counts[:, keep])
+        # A row with no counts in the selected genes falls back to all genes.
+        missing = ~np.isfinite(log_size_factor)
+        if missing.any():
+            log_size_factor[missing] = _log_median_ratio(counts[:, gene_mean > 0])[missing]
+        finite = np.isfinite(log_size_factor)
+        size_factor = np.zeros(counts.shape[0])
+        size_factor[finite] = np.exp(log_size_factor[finite] - np.mean(log_size_factor[finite]))
+    elif method == 'scale':
+        size_factor = 1./np.sum(counts, axis=0)*lib_size
+    else:
+        raise ValueError("Method must be in {'geomeans', 'libsize', 'scale'}.")
+
+    return size_factor
     if method=='geomeans':
         # Vectorized geometric mean (per gene, ignoring zeros)
         counts = np.asarray(counts, dtype=np.float64)
@@ -214,7 +280,7 @@ def comp_size_factor(counts, method='geomeans', lib_size=1e4, **kwargs):
     elif method=='scale':
         size_factor = 1./np.sum(counts, axis=0)*lib_size
     else:
-        raise ValueError("Method must be in {'geomeans' or 'scale'}.")
+        raise ValueError("Method must be in {'libsize', 'geomeans', 'scale'}.")
 
     return size_factor
 

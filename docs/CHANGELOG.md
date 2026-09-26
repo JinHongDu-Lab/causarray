@@ -9,6 +9,16 @@
   selected on the effect estimate: it dropped the pairs with p-values near 1
   (about 10% of expressed pairs on a Perturb-seq negative control), so BH over
   the remaining pairs was anti-conservative.
+- Size factors (`comp_size_factor`, used by `fit_gcate`, `LFC(offset=True)`
+  and `gcate_lfc_batch`) take the median of ratios over genes with mean count
+  of at least `min_mean=2` instead of every gene. In sparse single-cell data
+  the old factors captured about a third of the depth variation; the rest
+  shifted all highly expressed genes of an arm together, so their null
+  statistics were too spread. On a Replogle negative control (30 fake
+  perturbations cut from the controls) this cuts false discoveries from 114
+  to 14, and the null SD for genes above 5 counts per cell from 1.32 to
+  1.08. `min_mean=0` restores the old factors; `method='libsize'` uses total
+  counts.
 
 ## [0.1.0]
 

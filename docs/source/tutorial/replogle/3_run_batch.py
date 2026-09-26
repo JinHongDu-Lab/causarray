@@ -1,8 +1,8 @@
-"""Stage 3b: Replogle tutorial batched GCATE + LFC on the raw-count subset.
+"""Replogle tutorial: batched GCATE + LFC on the raw-count subset.
 ``r`` is the JIC choice from ``2_estimate_r.py``
 (``results/replogle-r.csv``; r = 10 on the raw counts, 2026-09-21) unless given
 on the command line. Writes ``results/replogle_results_r{r}.h5`` (resumable
-cache) and its nuisances, which ``5_refit_propensity.py`` reads."""
+cache) and its nuisances, which ``4_refit_propensity.py`` reads."""
 import sys, time
 sys.path.insert(0, '../../../..')
 import numpy as np, pandas as pd, scipy.sparse as sp, anndata as ad

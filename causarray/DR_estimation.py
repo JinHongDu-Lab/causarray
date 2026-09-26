@@ -462,6 +462,154 @@ def tune_penalty_factor(
     return factors, report
 
 
+def select_propensity_factors(
+    A, X_A, candidates=None, treatment_names=None, covariate_names=None,
+    trigger=None, target=None,
+    K=1, ps_model='logistic', mask=None, random_state=0, verbose=False,
+    class_weight=None, **kwargs,
+):
+    """Drop, per treatment, the covariates that concentrate its weights.
+
+    Latent factors estimated from expression can track a perturbation's own
+    effect. When they do, the propensity model partly separates that arm from
+    the controls and the inverse-probability weights pile onto the treated
+    cells that look least affected. This starts from every covariate and, for
+    each treatment whose support fails ``trigger``, removes the candidate most
+    imbalanced between that treatment and the controls (largest absolute
+    standardized mean difference), refits that treatment alone, and repeats
+    until ``target`` holds or no candidate is left. Other treatments keep
+    every covariate.
+
+    It is the discrete counterpart of :func:`tune_penalty_factor`: a penalty
+    shrinks one named coefficient, while this chooses which covariates stay.
+    Neither makes a contrast identified when a covariate is affected by
+    treatment; the rule only keeps the weights from resting on a few cells.
+
+    Parameters
+    ----------
+    A : array-like, shape (n,) or (n, a)
+        Binary treatment indicators; all-zero rows are the shared controls.
+    X_A : array-like, shape (n, d_A)
+        Propensity covariates, including the intercept column.
+    candidates : sequence or None
+        Covariates that may be dropped, by name or index. Defaults to every
+        non-constant column, so the intercept always stays.
+    treatment_names, covariate_names : sequence, optional
+        Labels for ``A`` columns and ``X_A`` columns.
+    trigger : mapping or None
+        Conditions selecting the treatments to adjust, as for
+        :func:`tune_penalty_factor`; a treatment is adjusted when **any**
+        holds. Defaults to ``{'ess_treated_fraction_lt': 0.5,
+        'overlap_ratio_lt': 0.3, 'auc_gt': 0.9}``.
+    target : mapping or None
+        Conditions that stop the removal, combined with **and**. Defaults to
+        ``{'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}``.
+    K, ps_model, mask, random_state, verbose, class_weight, **kwargs
+        Passed to :func:`estimate_propensity_scores` for every fit.
+
+    Returns
+    -------
+    drop_by_treatment : dict
+        ``{treatment: [covariate, ...]}`` for the adjusted treatments, ready
+        to hand to :func:`refit_propensity_scores`.
+    report : DataFrame
+        One row per adjusted treatment with the covariates dropped in order,
+        whether ``target`` was met, the number of fits, and the support
+        metrics with every covariate (``_all``) and after the removal
+        (``_chosen``).
+
+    Examples
+    --------
+    >>> drops, report = select_propensity_factors(
+    ...     A, X_A, treatment_names=names, covariate_names=cov)  # doctest: +SKIP
+    >>> pi, _ = refit_propensity_scores(
+    ...     A, X_A, pi_hat=pi, treatment_names=names, covariate_names=cov,
+    ...     drop_by_treatment=drops)  # doctest: +SKIP
+
+    .. versionadded:: 0.1.1
+    """
+    trigger = ({'ess_treated_fraction_lt': 0.5, 'overlap_ratio_lt': 0.3, 'auc_gt': 0.9}
+               if trigger is None else dict(trigger))
+    target = ({'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}
+              if target is None else dict(target))
+
+    A_arr = np.asarray(A, dtype=float)
+    if A_arr.ndim == 1:
+        A_arr = A_arr[:, None]
+    X_arr = np.asarray(X_A, dtype=float)
+    if treatment_names is None:
+        treatment_names = (list(A.columns) if hasattr(A, 'columns')
+                           else list(range(A_arr.shape[1])))
+    treatment_names = list(treatment_names)
+    if covariate_names is None:
+        covariate_names = (list(X_A.columns) if hasattr(X_A, 'columns')
+                           else [f'covariate_{j + 1}' for j in range(X_arr.shape[1])])
+    covariate_names = list(covariate_names)
+    if candidates is None:
+        candidates = [c for c, col in zip(covariate_names, X_arr.T) if np.ptp(col) > 0]
+    else:
+        resolved = []
+        for c in candidates:
+            if c in covariate_names:
+                resolved.append(c)
+            elif isinstance(c, (int, np.integer)) and 0 <= c < len(covariate_names):
+                resolved.append(covariate_names[c])
+            else:
+                raise ValueError(f'candidate {c!r} is not in covariate_names')
+        candidates = resolved
+    cand_idx = [covariate_names.index(c) for c in candidates]
+
+    mask_arr = None
+    if mask is not None:
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.ndim == 1:
+            mask_arr = mask_arr[:, None]
+    fit_kwargs = dict(K=K, ps_model=ps_model, mask=mask, clip=None,
+                      random_state=random_state, verbose=False,
+                      class_weight=class_weight, **kwargs)
+    pi = estimate_propensity_scores(A_arr, X_arr, **fit_kwargs)
+    ctrl = A_arr.sum(axis=1) == 0
+
+    def imbalance_order(j):
+        case = A_arr[:, j] == 1
+        smd = []
+        for k in cand_idx:
+            c_vals, t_vals = X_arr[ctrl, k], X_arr[case, k]
+            sd = np.sqrt((np.var(c_vals, ddof=1) + np.var(t_vals, ddof=1)) / 2)
+            smd.append(abs(np.mean(t_vals) - np.mean(c_vals)) / sd if sd > 0 else 0.0)
+        return [candidates[i] for i in np.argsort(smd)[::-1]]
+
+    rows, drops = [], {}
+    for j, name in enumerate(treatment_names):
+        before = _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
+        if not any(_meets(before, {key: bound}) for key, bound in trigger.items()):
+            continue
+        dropped, chosen, n_fits = [], before, 1
+        for covariate in imbalance_order(j):
+            dropped.append(covariate)
+            pi, _ = refit_propensity_scores(
+                A_arr, X_arr, pi_hat=pi, treatment_names=treatment_names,
+                covariate_names=covariate_names,
+                drop_by_treatment={name: list(dropped)}, **fit_kwargs)
+            n_fits += 1
+            chosen = _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
+            if _meets(chosen, target):
+                break
+        drops[name] = list(dropped)
+        rows.append({'treatment': name, 'dropped': ','.join(dropped),
+                     'n_dropped': len(dropped), 'target_met': _meets(chosen, target),
+                     'n_fits': n_fits,
+                     **{f'{k}_all': v for k, v in before.items()},
+                     **{f'{k}_chosen': v for k, v in chosen.items()}})
+
+    report = pd.DataFrame(rows)
+    if verbose and len(report):
+        print(f'[select_propensity_factors] {len(report)} treatments adjusted, '
+              f'{int(report.target_met.sum())} met the target, '
+              f'{report.n_fits.sum()} fits', flush=True)
+    return drops, report
+
+
 def refit_propensity_scores(
     A, X_A, drop_by_treatment=None, pi_hat=None, treatment_names=None,
     covariate_names=None, penalty_factors_by_treatment=None, K=1,

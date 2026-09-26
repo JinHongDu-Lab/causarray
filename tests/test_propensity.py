@@ -15,6 +15,7 @@ from causarray import (
     LFC,
     estimate_propensity_scores,
     tune_penalty_factor,
+    select_propensity_factors,
     plot_propensity_scores,
     plot_treatment_associations,
     refit_propensity_scores,
@@ -685,3 +686,46 @@ def test_tune_penalty_factor_scores_only_masked_cells():
     got = report.set_index('treatment').loc['benign_arm', 'auc_unpenalized']
     assert got == pytest.approx(expected)
 
+
+
+# ---------------------------------------------------------------------------
+# select_propensity_factors
+# ---------------------------------------------------------------------------
+
+def test_select_propensity_factors_drops_the_imbalanced_covariate_first():
+    A, X_A, names, cov, _ = _separating_design()
+    drops, report = select_propensity_factors(
+        A, X_A, treatment_names=names, covariate_names=cov, random_state=0)
+    assert drops == {'sep_arm': ['driver']}
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['target_met']
+    assert row['n_fits'] == 2
+    assert row['auc_all'] > 0.9
+    assert row['overlap_ratio_chosen'] > 0.3
+    assert 'benign_arm' not in report['treatment'].tolist()
+
+
+def test_select_propensity_factors_leaves_other_arms_and_the_intercept():
+    A, X_A, names, cov, _ = _separating_design()
+    base = estimate_propensity_scores(A, X_A, K=1, clip=None, random_state=0)
+    drops, _ = select_propensity_factors(
+        A, X_A, treatment_names=names, covariate_names=cov,
+        target={'auc_lt': 0.0}, random_state=0)                # unreachable
+    assert drops['sep_arm'] == ['driver', 'noise']             # intercept kept
+    updated, _ = refit_propensity_scores(
+        A, X_A, pi_hat=base.copy(), treatment_names=names, covariate_names=cov,
+        drop_by_treatment=drops, K=1, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    np.testing.assert_array_equal(base[:, j], updated[:, j])
+
+
+def test_select_propensity_factors_respects_candidates():
+    A, X_A, names, cov, _ = _separating_design()
+    drops, report = select_propensity_factors(
+        A, X_A, candidates=['noise'], treatment_names=names, covariate_names=cov,
+        random_state=0)
+    assert drops == {'sep_arm': ['noise']}
+    assert not report.set_index('treatment').loc['sep_arm', 'target_met']
+    with pytest.raises(ValueError, match='candidate'):
+        select_propensity_factors(A, X_A, candidates=['missing'],
+                                  treatment_names=names, covariate_names=cov)

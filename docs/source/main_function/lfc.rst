@@ -182,6 +182,34 @@ sensitivity analyses, distinguish pre-treatment covariates from possible
 post-treatment variables, and compare propensity overlap, effective sample
 sizes, and effect estimates before and after filtering.
 
+Choosing covariates per treatment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When treatment is assigned at random, as with guides in a Perturb-seq screen,
+the propensity model only has to absorb chance imbalance. Latent factors
+estimated from expression can instead track a perturbation's own effect; the
+model then partly separates that arm from the controls and the weights pile
+onto the treated cells that look least affected. ``select_propensity_factors``
+starts from every covariate and, for each treatment failing a support check,
+drops the covariate most imbalanced between that treatment and the controls
+(largest absolute standardized mean difference), one at a time, until the
+target holds::
+
+   drops, report = select_propensity_factors(
+       A, W_A, treatment_names=treatment_names, covariate_names=covariate_names,
+   )
+   pi_selected, audit = refit_propensity_scores(
+       A, W_A, pi_hat=estimation['pi_hat_raw'],
+       treatment_names=treatment_names, covariate_names=covariate_names,
+       drop_by_treatment=drops,
+   )
+
+By default a treatment is adjusted when its treated ESS fraction falls below
+0.5, its overlap below 0.3 or its AUC above 0.9, and removal stops once ESS
+exceeds 0.5 and overlap 0.3. The intercept always stays. Covariates that the
+treatment itself changes, such as library size after knocking down
+transcription machinery, are better left out of ``W_A`` from the start.
+
 Choosing the penalty factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -205,8 +233,8 @@ keeps as much of its adjustment role as the data support::
 Dropping the covariate is the infinite-penalty limit, so it bounds what any
 finite factor can achieve. The search evaluates that endpoint first: when the
 dropped fit already misses the target, the treatment is reported with
-``feasible=False`` after a single extra fit rather than an exhausted search,
-and no penalty is applied. Otherwise the factor is found by bisection on a log
+``feasible=False`` rather than searched, and receives the largest factor in
+``bracket`` (``on_infeasible='none'`` leaves it unpenalized instead). Otherwise the factor is found by bisection on a log
 scale, and ``tol`` trades fits against how tightly the smallest qualifying
 factor is resolved.
 
@@ -271,7 +299,7 @@ an extreme discovery from an invalid estimate.
 
 .. automodule:: causarray.DR_estimation
    :members: estimate_propensity_scores, refit_propensity_scores,
-             tune_penalty_factor
+             tune_penalty_factor, select_propensity_factors
 
 .. automodule:: causarray.diagnostics
    :members:

@@ -20,6 +20,14 @@
   1.08. `min_mean=0` restores the old factors; `method='libsize'` uses total
   counts.
 
+### Added
+
+- `select_propensity_factors` chooses the propensity covariates per
+  treatment: for a treatment whose weights concentrate (treated ESS < 0.5,
+  overlap < 0.3 or AUC > 0.9) it drops the covariates most imbalanced between
+  that treatment and the controls until its support recovers, and returns a
+  `drop_by_treatment` mapping for `refit_propensity_scores`.
+
 ## [0.1.0]
 
 Inference fix for small perturbation arms, and the GLM engine moves to crispyx

@@ -380,7 +380,7 @@ def compute_causal_estimand(
 def LFC(
     Y, W, A, W_A=None, family='nb', offset=False,
     Y_hat=None, pi_hat=None, cross_est=False, K=None, mask=None,
-    usevar: Literal['pooled'] = 'pooled',
+    usevar: Literal['pooled', 'unequal'] = 'pooled',
     thres_min='auto', thres_diff=1e-2, eps_var=None, min_counts=5.0,
     fdx=False, fdx_alpha=0.05, fdx_c=0.1,
     verbose=False, backend: str = "auto", ps_clip='auto',
@@ -422,9 +422,9 @@ def LFC(
     mask : array or None, shape (n, a)
         Boolean mask indicating eligible cells for each treatment. It limits
         propensity-model fitting and final estimand computation.
-    usevar : str
-        Variance estimator for the AIPW pseudo-outcomes. Only ``'pooled'``
-        remains: the influence-function (sandwich) variance ``var(eta) / n``
+    usevar : {'pooled', 'unequal'}
+        Variance estimator for the AIPW pseudo-outcomes. ``'pooled'``
+        (default) is the influence-function (sandwich) variance ``var(eta) / n``
         of the estimator, where ``eta`` are the per-cell influence values of
         the log-ratio and ``n`` counts every cell entering the estimand. With
         calibrated propensity scores this equals the efficient two-sample form
@@ -434,16 +434,25 @@ def LFC(
         ``n/(n-d)`` and p-values use a t reference with ``n-d`` degrees of
         freedom (see Notes).
 
-        ``'unequal'`` is accepted as a deprecated alias of ``'pooled'``. The
-        by-arm Welch formula ``s₀²/n₀ + s₁²/n₁`` it used to select is not the
-        variance of an estimator that averages pseudo-outcomes over all cells:
-        it doubles the standard error for equal arms and inflates it far more
-        for rare treatments.
+        ``'unequal'`` is the by-arm Welch variance ``s₀²/n₀ + s₁²/n₁`` of the
+        influence values, with Welch-Satterthwaite degrees of freedom. It is
+        not the variance of an estimator that averages pseudo-outcomes over
+        all rows: it roughly doubles the standard error for equal arms and
+        inflates it far more for rare treatments, so do not use it for
+        perturbation screens. For small, roughly balanced case-control designs
+        (for example donor-level pseudo-bulk) it gives more conservative
+        results than ``'pooled'``: on 85 SEA-AD donors with GCATE factors,
+        where ``'pooled'`` was anti-conservative under permuted labels (null
+        SD 1.1-1.8), ``'unequal'`` gave 0-1 false discoveries per permutation
+        (null SD 0.6-0.9).
 
         Neither estimator models within-donor or within-subject correlation.
         Repeated cells from the same biological unit should still be
         pseudo-bulked or analysed with a cluster-aware method.
 
+        .. versionchanged:: 0.1.1
+            ``'unequal'`` restored as a conservative option for small
+            case-control designs.
         .. versionchanged:: 0.1.0
             ``'unequal'`` removed; ``'pooled'`` is the only estimator.
         .. versionchanged:: 0.0.6
@@ -574,17 +583,8 @@ def LFC(
             'replaces the additive constant.',
             FutureWarning, stacklevel=2,
         )
-    if usevar == 'unequal':
-        warnings.warn(
-            "usevar='unequal' is deprecated and treated as 'pooled': the by-arm Welch "
-            "formula is not the variance of the AIPW estimator (2x the correct SE for "
-            "equal arms, far larger for rare treatments). It will raise in a future "
-            "release.",
-            FutureWarning, stacklevel=2,
-        )
-        usevar = 'pooled'
-    elif usevar != 'pooled':
-        raise ValueError("usevar must be 'pooled'")
+    if usevar not in ('pooled', 'unequal'):
+        raise ValueError("usevar must be 'pooled' or 'unequal'")
 
     def estimand(etas, A, **kwargs):
         eta_0, eta_1 = etas[..., 0], etas[..., 1]
@@ -621,17 +621,26 @@ def LFC(
         n_params = int(kwargs.get('_n_params', 1))
         in_sample = bool(kwargs.get('_in_sample', True))
         df_resid = max(n_cells - n_params, 2)
-        var_est = np.var(eta_est, axis=0, ddof=1) / n_cells
-        if in_sample:
-            # Residuals of an outcome model fitted on the same cells are
-            # deflated by ~(n - d)/n; rescale (HC1-style) so that small
-            # designs (donor-level pseudo-bulk, ~100-cell arms) are not
-            # anti-conservative.  Cross-fitted nuisances (K > 1) need no
-            # rescaling.
-            var_est = var_est * (n_cells / df_resid)
-        # t reference with residual degrees of freedom; equals the normal
-        # reference for large n.
-        df_eff = np.full(var_est.shape, float(df_resid))
+        if usevar == 'unequal':
+            # Welch variance s0^2/n0 + s1^2/n1 of the influence values by arm,
+            # with Welch-Satterthwaite degrees of freedom.
+            with np.errstate(invalid='ignore', divide='ignore'):
+                v0 = np.var(eta_est[A == 0], axis=0, ddof=1) / max(n_0, 1)
+                v1 = np.var(eta_est[A == 1], axis=0, ddof=1) / max(n_1, 1)
+                var_est = v0 + v1
+                df_eff = (v0 + v1) ** 2 / (v0 ** 2 / max(n_0 - 1, 1) + v1 ** 2 / max(n_1 - 1, 1))
+        else:
+            var_est = np.var(eta_est, axis=0, ddof=1) / n_cells
+            if in_sample:
+                # Residuals of an outcome model fitted on the same cells are
+                # deflated by ~(n - d)/n; rescale (HC1-style) so that small
+                # designs (donor-level pseudo-bulk, ~100-cell arms) are not
+                # anti-conservative.  Cross-fitted nuisances (K > 1) need no
+                # rescaling.
+                var_est = var_est * (n_cells / df_resid)
+            # t reference with residual degrees of freedom; equals the normal
+            # reference for large n.
+            df_eff = np.full(var_est.shape, float(df_resid))
 
         # Under the working Poisson model Y_i ~ Poisson(s_i * tau_k),
         # Var(Y_i / s_i) = tau_k / s_i. The unweighted arm mean thus has

@@ -31,6 +31,14 @@
   that treatment and the controls until its support recovers, and returns a
   `drop_by_treatment` mapping for `refit_propensity_scores`.
 
+### Changed
+
+- `LFC(usevar='unequal')` is the by-arm Welch variance again (0.1.0 made it an
+  alias of `'pooled'`). It is conservative for small case-control designs: on
+  85 SEA-AD donors, permuted disease labels gave 0-1 false discoveries with
+  null SD 0.6-0.9, against SD 1.1-1.8 under `'pooled'`. `'pooled'` stays the
+  default; `'unequal'` over-inflates the standard errors of rare treatments.
+
 ## [0.1.0]
 
 Inference fix for small perturbation arms, and the GLM engine moves to crispyx

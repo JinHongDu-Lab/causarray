@@ -74,12 +74,16 @@ Two further safeguards apply to every gene:
   arms: filtering on the estimated effect would drop the pairs with p-values
   near 1 and make the BH correction over the rest anti-conservative.
 
-``usevar='unequal'`` is a deprecated alias of ``'pooled'``. The by-arm Welch
-formula ``s0²/n0 + s1²/n1`` it used to select is not the variance of an
-estimator that averages pseudo-outcomes over all cells: it doubles the standard
-error for equal arms and inflates it far more for rare treatments. Neither
-formula models within-donor correlation; repeated cells from one biological
-unit should still be pseudo-bulked or analysed with a cluster-aware method.
+``usevar='pooled'`` (default) is the influence-function variance of the
+estimator. ``usevar='unequal'`` uses the by-arm Welch variance
+``s0²/n0 + s1²/n1`` with Welch-Satterthwaite degrees of freedom. It roughly
+doubles the standard error for equal arms and inflates it far more for rare
+treatments, so do not use it for perturbation screens. For small case-control
+studies it is the more conservative choice: on 85 SEA-AD donors, permuted
+disease labels gave null statistics with SD 1.1-1.8 under ``'pooled'`` and
+0.6-0.9 with 0-1 false discoveries under ``'unequal'``. Neither formula models
+within-donor correlation; repeated cells from one biological unit should still
+be pseudo-bulked or analysed with a cluster-aware method.
 
 Propensity diagnostics
 ----------------------

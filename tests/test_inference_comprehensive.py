@@ -430,7 +430,7 @@ class TestLFCIntegration:
 
     # ---- I11: type I error, balanced, unequal (Welch) ----
     def test_type1_balanced_welch(self, null_nb_balanced):
-        """I11 — FDR ≤ 10% under balanced null (deprecated alias usevar='unequal')."""
+        """I11 — FDR ≤ 10% under balanced null (usevar='unequal', Welch)."""
         Y, W, A, _, _ = null_nb_balanced
         df, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                     usevar='unequal', backend='fast')
@@ -446,17 +446,20 @@ class TestLFCIntegration:
         fdr = (df['padj'] < 0.05).mean()
         assert fdr <= 0.10, f"Imbalanced type I error too high: FDR={fdr:.3f}"
 
-    # ---- I13: 'unequal' is a deprecated alias of 'pooled' ----
-    def test_unequal_is_alias_of_pooled(self, null_nb_imbalanced):
-        """I13 — usevar='unequal' warns and returns exactly the pooled result."""
-        Y, W, A, _, _ = null_nb_imbalanced
+    # ---- I13: 'unequal' is the Welch variance, more conservative than 'pooled' ----
+    def test_unequal_is_welch_and_more_conservative(self, null_nb_balanced):
+        """I13 — same estimates, Welch standard errors about sqrt(2) larger for equal arms."""
+        Y, W, A, _, _ = null_nb_balanced
         df_pooled, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                            usevar='pooled', backend='fast')
-        with pytest.warns(FutureWarning, match="deprecated and treated as 'pooled'"):
-            df_alias, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
-                              usevar='unequal', backend='fast')
-        pd.testing.assert_frame_equal(df_alias, df_pooled)
-        with pytest.raises(ValueError, match="usevar must be 'pooled'"):
+        df_welch, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
+                          usevar='unequal', backend='fast')
+        np.testing.assert_allclose(df_welch['tau'], df_pooled['tau'])
+        ok = np.isfinite(df_pooled['std']) & ~df_pooled['var_floored'] & ~df_welch['var_floored']
+        ratio = (df_welch.loc[ok, 'std'] / df_pooled.loc[ok, 'std']).median()
+        assert 1.2 < ratio < 2.2, ratio
+        assert (df_welch['padj'] < 0.1).sum() <= (df_pooled['padj'] < 0.1).sum()
+        with pytest.raises(ValueError, match="usevar must be 'pooled' or 'unequal'"):
             LFC(Y, W, A[:, None], family='nb', offset=True, usevar='welch', backend='fast')
 
     # ---- I14: power under balanced NB signal ----

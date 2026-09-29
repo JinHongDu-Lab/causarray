@@ -274,7 +274,7 @@ def compute_causal_estimand(
     res = []
     _count_control_shared = None
     _small_arm_floored = {}
-    iters = range(A.shape[1]) if A.shape[1]==1 else tqdm(range(A.shape[1]))
+    iters = tqdm(range(A.shape[1])) if verbose and A.shape[1] > 1 else range(A.shape[1])
     for j in iters:
         if mask is not None:
             i_cells = mask[:, j]

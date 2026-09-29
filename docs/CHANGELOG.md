@@ -22,6 +22,7 @@
 - `fit_gcate` now uses an `offset` array. The fit reads its offset from
   `size_factor`, which was set only for `offset=True`, so a supplied array was
   replaced by ones everywhere except the dispersion estimate.
+- `LFC` shows its per-treatment progress bar only with `verbose=True`.
 
 ### Added
 

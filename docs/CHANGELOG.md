@@ -34,6 +34,10 @@
 
 ### Changed
 
+- **crispyx >= 0.1.6 is required.** With latent factors in the outcome model,
+  crispyx 0.1.5's structured GLM fitter was about 2.5 times slower than
+  0.1.6's (same estimates): 159 s against 62 s for LFC on 5,000 cells, 3,000
+  genes and 10 treatments.
 - `LFC(usevar='unequal')` is the by-arm Welch variance again (0.1.0 made it an
   alias of `'pooled'`). It is conservative for small case-control designs: on
   85 SEA-AD donors, permuted disease labels gave 0-1 false discoveries with

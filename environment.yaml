@@ -41,7 +41,7 @@ dependencies:
 
       # optional fast GLM backend; also provides the marginal Wilcoxon
       # comparison used by the Replogle and Adamson tutorials
-      - crispyx>=0.1.5
+      - crispyx>=0.1.6
 
       # for development
       - build

@@ -93,7 +93,7 @@ Read this before the effects. An arm whose propensity model separates it from th
 
 Guides are assigned at random, so the propensity model only has to absorb chance imbalance between an arm and the controls. Two consequences for its covariates:
 
-* **Library size is left out.** Several of these knockouts shift library size strongly, and with it in the model their arms separate from the controls (AUC above 0.9, see below). Measured library size mixes capture depth with total RNA content, which a knockout can change, so it is not a reason a cell received its guide.
+* **Library size is left out, as a judgement call.** It could be a confounder, since capture depth and cell quality affect both guide detection and measured expression, or a consequence of the knockout, which can change a cell's total RNA; these data cannot tell which. Most arms here have smaller libraries than the controls (median 64% of the control level). With library size in the model, several arms separate from the controls (AUC above 0.9, last column of the table below), so their weights would rest on a few cells. Leaving it out keeps every arm supported, at the cost of not adjusting for depth-related confounding; the outcome model still normalizes for depth through the size factors. The `LFC` documentation discusses this choice.
 * **Latent factors are included, then checked arm by arm.** A factor can also track a perturbation's own effect; when one does, `select_propensity_factors` drops it for that arm only. It flags an arm whose treated ESS falls below 0.5, overlap below 0.3 or AUC above 0.9, and removes the factor most imbalanced between that arm and the controls, one at a time, until ESS and overlap recover.
 
 ```{r propensity-diagnostics}

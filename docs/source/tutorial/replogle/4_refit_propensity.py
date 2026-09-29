@@ -1,9 +1,10 @@
 """Re-estimate LFC with a propensity model chosen per arm.
 
 Guides are assigned at random, so the propensity model only needs to absorb
-chance imbalance. Log library size is left out: knocking down transcription
-machinery shrinks a cell's total RNA, so library size mostly records the
-perturbation's own effect. The model starts from the intercept and all latent
+chance imbalance. Log library size is left out. It could be a confounder
+(capture depth) or an effect of the knockdown (total RNA); the data cannot tell
+which, and with it in the model several arms separate from the controls. The
+model starts from the intercept and all latent
 factors; ``select_propensity_factors`` then drops, for each arm whose
 weights concentrate (treated ESS < 0.5, overlap < 0.3 or AUC > 0.9), the
 factors most imbalanced between that arm and the controls until its support

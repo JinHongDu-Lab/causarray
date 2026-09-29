@@ -186,6 +186,28 @@ sensitivity analyses, distinguish pre-treatment covariates from possible
 post-treatment variables, and compare propensity overlap, effective sample
 sizes, and effect estimates before and after filtering.
 
+Library size in the propensity model
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``prep_causarray_data`` adds standardized log library size to ``X_A`` by
+default. Whether it belongs there is a judgement the data cannot settle.
+Library size can be a confounder: capture efficiency and cell quality affect
+both which cells end up with a detected guide and their measured expression.
+It can also be a consequence of treatment: a perturbation that changes a
+cell's total RNA changes its library size, and adjusting for it then removes
+part of the effect. Both readings fit the same data.
+
+A practical rule is to fit the propensity model with library size and check
+support. If every arm stays well supported, keep it. If some arms separate
+from the controls with it (AUC above 0.9 or overlap below 0.3), their weights
+rest on a few cells whichever reading is right; leaving library size out
+restores support, at the cost of not adjusting for any depth-related
+confounding. :func:`tune_penalty_factor` sits between the two and shrinks the
+coefficient only as far as support requires. Either way, the outcome model
+still normalizes for depth through the size-factor offset, and the choice
+should be reported. The Perturb-seq and Replogle tutorials leave library size
+out because several arms separate with it.
+
 Choosing covariates per treatment
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -210,9 +232,8 @@ target holds::
 
 By default a treatment is adjusted when its treated ESS fraction falls below
 0.5, its overlap below 0.3 or its AUC above 0.9, and removal stops once ESS
-exceeds 0.5 and overlap 0.3. The intercept always stays. Covariates that the
-treatment itself changes, such as library size after knocking down
-transcription machinery, are better left out of ``W_A`` from the start.
+exceeds 0.5 and overlap 0.3. The intercept always stays. Library size is
+better decided before this step; see below.
 
 Choosing the penalty factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -19,6 +19,9 @@
   to 14, and the null SD for genes above 5 counts per cell from 1.32 to
   1.08. `min_mean=0` restores the old factors; `method='libsize'` uses total
   counts.
+- `fit_gcate` now uses an `offset` array. The fit reads its offset from
+  `size_factor`, which was set only for `offset=True`, so a supplied array was
+  replaced by ones everywhere except the dispersion estimate.
 
 ### Added
 

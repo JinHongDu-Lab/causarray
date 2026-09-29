@@ -1,6 +1,5 @@
-"""Re-select the number of latent factors for the Replogle tutorial on the
-raw-count subset (the cached results/replogle-r-legacy.csv was computed on log-normalised
-values). Same grid as the tutorial; writes results/replogle-r.csv."""
+"""Select the number of latent factors for the Replogle tutorial on the
+raw-count subset. Writes results/replogle-r.csv."""
 import sys, time
 sys.path.insert(0, '../../../..')
 import numpy as np, pandas as pd, scipy.sparse as sp, anndata as ad

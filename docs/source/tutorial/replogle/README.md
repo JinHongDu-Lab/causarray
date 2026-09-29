@@ -7,7 +7,7 @@ Layout convention, shared by the other tutorial folders:
 - `data/` — the raw download and the prepared inputs.
 - `results/` — everything generated: fits, caches, tables, logs.
 
-Only the notebook, the four scripts, this file and the two small JIC tables in
+Only the notebook, the four scripts, this file and the JIC table in
 `results/` are tracked in git; the rest of `data/`
 and `results/` is local and regenerated.
 
@@ -46,7 +46,6 @@ and `results/` is local and regenerated.
 | `results/replogle_results_r10.nuisances.h5` | 50 GB | **notebook input** — outcome model and latent factors per batch; the notebook reads one batch's factors |
 | `results/replogle_propensity_selection.csv` | 30 KB | **notebook input** — per-arm propensity report from `4_refit_propensity.py` |
 | `results/replogle-r.csv` | 0.6 KB | **notebook input** — JIC table on raw counts (tracked) |
-| `results/replogle-r-legacy.csv` | 0.4 KB | **notebook input** — JIC table from the log-normalized era (tracked); the notebook falls back to it only if the current table is absent, and its preprocessing differs |
 | `results/replogle_subset_norm_cx_wilcoxon.h5ad` | 92 MB | notebook cache — Wilcoxon comparison results |
 | `results/replogle_supt5h_go_results.csv` | 2.6 MB | notebook cache — SUPT5H GO enrichment; regenerate when the input gene lists change |
 | `results/run_batch.log` | 11 KB | run record for `3_run_batch.py`; the last line reports rows, discoveries, zero-count arms and runtime |

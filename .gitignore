@@ -183,9 +183,8 @@ causarray/___*.py
 # (data/replogle_subset.h5ad is ~2 GB).
 docs/source/tutorial/replogle/data/
 docs/source/tutorial/replogle/results/**
-# the two small JIC tables are committed so the notebook runs without a refit
+# the JIC table is committed so the notebook runs without a refit
 !docs/source/tutorial/replogle/results/replogle-r.csv
-!docs/source/tutorial/replogle/results/replogle-r-legacy.csv
 
 # Unrelated tutorial directory (not part of causarray package docs)
 docs/source/tutorial/scp/

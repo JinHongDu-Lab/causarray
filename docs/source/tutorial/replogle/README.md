@@ -43,7 +43,7 @@ and `results/` is local and regenerated.
 | `data/replogle_subset.h5ad` | 2.2 GB | **notebook input** — raw-count subset; source for every other artifact |
 | `data/replogle_subset_norm.h5ad` | 2.2 GB | notebook cache — log1p-normalized counts; rebuilt from the subset in one `crispyx` call if deleted |
 | `results/replogle_results.h5` | 283 MB | **notebook input** — copy of `results/replogle_results_selected.h5` |
-| `results/replogle_results_r10.nuisances.h5` | 50 GB | **notebook input** — outcome model and latent factors per batch; the notebook reads one batch's factors |
+| `results/replogle_results_r10.nuisances.h5` | 50 GB | optional notebook input — outcome model and latent factors per batch; the notebook reads one batch's factors for the propensity walk-through and skips it if the file is absent |
 | `results/replogle_propensity_selection.csv` | 30 KB | **notebook input** — per-arm propensity report from `4_refit_propensity.py` |
 | `results/replogle-r.csv` | 0.6 KB | **notebook input** — JIC table on raw counts (tracked) |
 | `results/replogle_subset_norm_cx_wilcoxon.h5ad` | 92 MB | notebook cache — Wilcoxon comparison results |

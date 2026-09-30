@@ -322,9 +322,9 @@ def summarize(tag, df, df_wc, nulls=()):
     if len(nulls):
         # Both methods are scored, and BH-adjusted, on the genes causarray tests.
         n = pd.concat([wilcoxon_on(d, w) for d, w in nulls])
-        row['null: causarray false hits'] = int((n['padj'] < Q).sum())
-        row['null: Wilcoxon false hits'] = int((n['wilcox_padj'] < Q).sum())
-        row['null: SD of z (target 1)'] = round(n['stat'].std(), 2)
+        row['fake perturbations: causarray hits'] = int((n['padj'] < Q).sum())
+        row['fake perturbations: Wilcoxon hits'] = int((n['wilcox_padj'] < Q).sum())
+        row['fake perturbations: SD of z (target 1)'] = round(n['stat'].std(), 2)
     return row
 
 

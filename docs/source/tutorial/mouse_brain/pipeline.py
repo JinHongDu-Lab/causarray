@@ -54,8 +54,10 @@ MIN_CELLS = 50       # keep genes detected in at least this many cells
 RANK = 8             # latent factors; chosen by JIC on L4-5 IT Glut, fixed for all cell types
 BATCH_SIZE = 10      # perturbations per LFC call; peak memory ~ n_cells * n_genes * BATCH_SIZE * 16 bytes
 Q = 0.05             # FDR level for both methods
-MIN_COUNTS = 20      # LFC tests a gene only with >= ~20 expected counts in the smaller arm
-                     # (package default 5); chosen from the null check in the notebook
+MIN_COUNTS = 20      # LFC tests a gene in an arm only if (higher of the two arm means, in
+                     # counts per cell) x (cells in the smaller arm) >= 20, i.e. about 20 UMI
+                     # counts expected in the smaller arm (package default 5); chosen from
+                     # the null check in the notebook
 
 
 def paths(tag, variant=''):
@@ -126,13 +128,13 @@ def _propensity(A, W_A):
     """Propensity support check; returns (pi_hat or None, report).
 
     The design holds the intercept, log library size and the latent factors.
-    Library size could be a confounder (capture depth) or an effect of the
-    perturbation (total RNA); it stays in while every arm is supported.
+    Library size is a technical factor; the outcome model adjusts every arm for
+    it through the size-factor offset, whatever the propensity design.
     ``select_propensity_factors`` flags an arm whose treated ESS falls below
-    0.5, overlap below 0.3 or AUC above 0.9, and drops for that arm only the
-    covariate most imbalanced between it and the controls (library size
-    included), one at a time, until support recovers. With nothing flagged
-    LFC fits its own scores (None is returned).
+    0.5, overlap below 0.3 or AUC above 0.9, and drops from that arm's
+    propensity model only the covariate most imbalanced between it and the
+    controls (library size included), one at a time, until support recovers.
+    With nothing flagged LFC fits its own scores (None is returned).
     """
     names = list(A.columns)
     cov = ['intercept', 'log_library_size'] + [f'U{k + 1}' for k in range(W_A.shape[1] - 2)]
@@ -217,6 +219,27 @@ def wilcoxon_table(h5ad):
     return df.rename(columns={df.columns[0]: 'trt', df.columns[1]: 'gene_names'})
 
 
+def wilcoxon_on(df, df_wc):
+    """Wilcoxon results on the gene-perturbation pairs causarray tests.
+
+    Keeps the pairs of ``df`` with a finite statistic, attaches the Wilcoxon
+    columns and recomputes ``wilcox_padj`` by BH within each perturbation over
+    those pairs, the same family causarray's ``padj`` uses. crispyx's own
+    adjusted p-values are taken over every gene in the file, including genes
+    seen in one or two cells. For those the tie-corrected normal approximation
+    breaks down: a gene in one perturbed cell and no control gets
+    z = sqrt(n_control / n_treated), about 15 here (p ~ 1e-46), where an exact
+    rank test gives p of order n_treated / n_cells. Those genes pass BH and
+    loosen the cutoff for the rest of the arm.
+    """
+    from statsmodels.stats.multitest import multipletests
+
+    m = df[np.isfinite(df['stat'])].merge(df_wc, on=['trt', 'gene_names'], how='left')
+    m['wilcox_padj'] = m.groupby('trt')['wilcox_pvalue'].transform(
+        lambda p: pd.Series(multipletests(p.fillna(1.0), method='fdr_bh')[1], index=p.index))
+    return m
+
+
 def run_wilcoxon(tag):
     p = paths(tag)
     if not p['wilcoxon'].exists():
@@ -284,7 +307,7 @@ def run_null(tag, Y, A, X, X_A, res_2, seed, variant=''):
 # ── Step 6: one-line QC per cell type ────────────────────────────────────────
 def summarize(tag, df, df_wc, nulls=()):
     """Numbers to scan across cell types; see the notebook for expected values."""
-    m = df[np.isfinite(df['stat'])].merge(df_wc, on=['trt', 'gene_names'], how='left')
+    m = wilcoxon_on(df, df_wc)
     ca = m['padj'] < Q
     wc = m['wilcox_padj'] < Q
     row = {
@@ -297,9 +320,8 @@ def summarize(tag, df, df_wc, nulls=()):
         'hits with zero perturbed counts': int((m.loc[ca, 'count_treated'] == 0).sum()),
     }
     if len(nulls):
-        # Both methods are scored on the genes causarray tests.
-        n = pd.concat([d[np.isfinite(d['stat'])].merge(w, on=['trt', 'gene_names'], how='left')
-                       for d, w in nulls])
+        # Both methods are scored, and BH-adjusted, on the genes causarray tests.
+        n = pd.concat([wilcoxon_on(d, w) for d, w in nulls])
         row['null: causarray false hits'] = int((n['padj'] < Q).sum())
         row['null: Wilcoxon false hits'] = int((n['wilcox_padj'] < Q).sum())
         row['null: SD of z (target 1)'] = round(n['stat'].std(), 2)

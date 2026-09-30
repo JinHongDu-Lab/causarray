@@ -34,7 +34,7 @@ memory when loaded.
 Choosing the variance estimator
 -------------------------------
 
-Since 0.1.0 ``LFC`` uses ``usevar='pooled'``, the influence-function
+``LFC`` uses ``usevar='pooled'``, the influence-function
 (sandwich) variance ``var(eta)/n`` of the AIPW estimator, where ``eta`` are the
 per-cell influence values of the log-ratio and ``n`` counts every cell that
 enters the estimand. With calibrated propensity scores this equals the
@@ -61,23 +61,29 @@ Two further safeguards apply to every gene:
   significant while a genuine complete knockout (``tau`` of -5 or more) still
   is. The ``var_floored`` column marks affected pairs and ``std_raw`` reports
   the pre-floor standard error.
-* **Expression threshold.** ``thres_min='auto'`` (default since 0.1.0)
-  requires about ``min_counts`` (5) expected counts in the smaller arm, i.e. a
-  larger-arm mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a
-  100-cell arm, 0.007 for a 700-cell arm. A fixed float can be passed
-  instead.
+* **Size factors.** ``offset=True`` uses median-of-ratios size factors
+  computed over genes with mean count of at least 2 (``min_mean``). Ratios
+  of sparse genes, whose counts are mostly 1 or 2, miss much of each cell's
+  sequencing depth; the leftover depth then moves every highly expressed
+  gene of an arm together and inflates their null statistics.
+* **Expression threshold.** ``thres_min='auto'`` (default) requires about
+  ``min_counts`` (5) expected counts in the smaller arm, i.e. a larger-arm
+  mean of at least ``5 / min(n0, n1)`` counts per cell: 0.05 for a 100-cell
+  arm, 0.007 for a 700-cell arm. A fixed float can be passed instead. The
+  threshold looks only at expression level, never at the difference between
+  arms: filtering on the estimated effect would drop the pairs with p-values
+  near 1 and make the BH correction over the rest anti-conservative.
 
-``usevar='unequal'`` (the 0.0.6-0.0.9 default) applied a two-sample Welch
-formula ``s0²/n0 + s1²/n1`` by arm. That is not the variance of an estimator
-that averages pseudo-outcomes over all cells: for equal arm sizes it is exactly
-twice the correct standard error, and for a rare treatment fitted with
-class-balanced propensity scores it is an order of magnitude too large, so
-real effects were estimated but not called. It was removed in 0.1.0 after
-re-validation on the Perturb-seq, SEA-AD and Adamson tutorials; the argument
-is accepted as an alias of ``'pooled'`` with a ``FutureWarning`` for one
-release. Neither estimator models within-donor correlation; repeated cells
-from one biological unit should still be pseudo-bulked or analysed with a
-cluster-aware method.
+``usevar='pooled'`` (default) is the influence-function variance of the
+estimator. ``usevar='unequal'`` uses the by-arm Welch variance
+``s0²/n0 + s1²/n1`` with Welch-Satterthwaite degrees of freedom. It roughly
+doubles the standard error for equal arms and inflates it far more for rare
+treatments, so do not use it for perturbation screens. For small case-control
+studies it is the more conservative choice: on 85 SEA-AD donors, permuted
+disease labels gave null statistics with SD 1.1-1.8 under ``'pooled'`` and
+0.6-0.9 with 0-1 false discoveries under ``'unequal'``. Neither formula models
+within-donor correlation; repeated cells from one biological unit should still
+be pseudo-bulked or analysed with a cluster-aware method.
 
 Propensity diagnostics
 ----------------------
@@ -88,21 +94,20 @@ overfitting diagnostics.  :func:`summarize_propensity_scores` reports overlap,
 tail mass, and inverse-weight effective sample size, while
 :func:`plot_propensity_scores` compares treatment and control distributions.
 
-Since 0.1.0 both the standalone estimator and ``LFC`` fit calibrated
-logistic propensity scores by default (``class_weight=None``), which is what
-the AIPW weights ``A/pi`` require. The former ``'balanced'`` default centred
-the scores near 0.5 whatever the prevalence; for a treatment with 0.6%
-prevalence that shrank the AIPW correction term by roughly twice the
-prevalence and turned the estimator into an outcome-model plug-in whose
-uncertainty the influence function no longer reflected. ``'balanced'`` remains
-available to reproduce earlier analyses. Because in-sample logistic fits with
+Both the standalone estimator and ``LFC`` fit calibrated logistic propensity
+scores by default (``class_weight=None``), which is what the AIPW weights
+``A/pi`` require. ``class_weight='balanced'`` centres the scores near 0.5
+whatever the prevalence; for a treatment with 0.6% prevalence that shrinks the
+AIPW correction term by roughly twice the prevalence and turns the estimator
+into an outcome-model plug-in whose uncertainty the influence function no
+longer reflects. Because in-sample logistic fits with
 ~100 cases against thousands of controls overstate separation, use out-of-fold
 scores (``K=5``) when judging overlap.
 
 Propensity scores used by AIPW are clipped with a prevalence-aware bound by
 default (``ps_clip='auto'``: ``lower = min(0.01, prevalence/10)`` per
-treatment, and symmetrically above). The fixed ``(0.01, 0.99)`` used before
-0.1.0 clipped every calibrated score of a treatment with prevalence below 1%.
+treatment, and symmetrically above). A fixed ``(0.01, 0.99)`` would clip every
+calibrated score of a treatment with prevalence below 1%.
 The resolved bounds are returned as ``estimation['ps_clip_bounds']`` and the
 raw scores as ``estimation['pi_hat_raw']``.
 
@@ -116,13 +121,12 @@ Small perturbation arms
 -----------------------
 
 Screens with fewer than ~200 cells per perturbation and thousands of shared
-controls are the regime in which the pre-0.1.0 defaults failed (SCARF
-tutorial, "Investigation" section): 83% of discoveries were genes with zero
-counts in the perturbed arm, and real effects had t-statistics halved by the
-Welch formula. In this regime inspect the ``count_treated`` and
-``var_floored`` columns, keep the default expression threshold, and expect a
-``RuntimeWarning`` listing how many pairs the variance floor
-bound.
+controls are where chance all-zero arms and sparse genes matter most. In this
+regime inspect the ``count_treated`` and ``var_floored`` columns, and expect a
+``RuntimeWarning`` listing how many pairs the variance floor bound. A
+negative control is cheap: label random subsets of control cells as fake
+perturbations of the real arm sizes and run ``LFC`` on them. If its false
+discoveries concentrate in sparse genes, raise ``min_counts`` (e.g. to 20).
 
 Treatment-specific covariate diagnostics
 ----------------------------------------
@@ -182,6 +186,55 @@ sensitivity analyses, distinguish pre-treatment covariates from possible
 post-treatment variables, and compare propensity overlap, effective sample
 sizes, and effect estimates before and after filtering.
 
+Library size in the propensity model
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``prep_causarray_data`` adds standardized log library size to ``X_A`` by
+default. Whether it belongs there is a judgement the data cannot settle.
+Library size can be a confounder: capture efficiency and cell quality affect
+both which cells end up with a detected guide and their measured expression.
+It can also be a consequence of treatment: a perturbation that changes a
+cell's total RNA changes its library size, and adjusting for it then removes
+part of the effect. Both readings fit the same data.
+
+A practical rule is to fit the propensity model with library size and check
+support. If every arm stays well supported, keep it. If some arms separate
+from the controls with it (AUC above 0.9 or overlap below 0.3), their weights
+rest on a few cells whichever reading is right; leaving library size out
+restores support, at the cost of not adjusting for any depth-related
+confounding. :func:`tune_penalty_factor` sits between the two and shrinks the
+coefficient only as far as support requires. Either way, the outcome model
+still normalizes for depth through the size-factor offset, and the choice
+should be reported. The Perturb-seq and Replogle tutorials leave library size
+out because several arms separate with it.
+
+Choosing covariates per treatment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When treatment is assigned at random, as with guides in a Perturb-seq screen,
+the propensity model only has to absorb chance imbalance. Latent factors
+estimated from expression can instead track a perturbation's own effect; the
+model then partly separates that arm from the controls and the weights pile
+onto the treated cells that look least affected. ``select_propensity_factors``
+starts from every covariate and, for each treatment failing a support check,
+drops the covariate most imbalanced between that treatment and the controls
+(largest absolute standardized mean difference), one at a time, until the
+target holds::
+
+   drops, report = select_propensity_factors(
+       A, W_A, treatment_names=treatment_names, covariate_names=covariate_names,
+   )
+   pi_selected, audit = refit_propensity_scores(
+       A, W_A, pi_hat=estimation['pi_hat_raw'],
+       treatment_names=treatment_names, covariate_names=covariate_names,
+       drop_by_treatment=drops,
+   )
+
+By default a treatment is adjusted when its treated ESS fraction falls below
+0.5, its overlap below 0.3 or its AUC above 0.9, and removal stops once ESS
+exceeds 0.5 and overlap 0.3. The intercept always stays. Library size is
+better decided before this step; see above.
+
 Choosing the penalty factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -205,8 +258,8 @@ keeps as much of its adjustment role as the data support::
 Dropping the covariate is the infinite-penalty limit, so it bounds what any
 finite factor can achieve. The search evaluates that endpoint first: when the
 dropped fit already misses the target, the treatment is reported with
-``feasible=False`` after a single extra fit rather than an exhausted search,
-and no penalty is applied. Otherwise the factor is found by bisection on a log
+``feasible=False`` rather than searched, and receives the largest factor in
+``bracket`` (``on_infeasible='none'`` leaves it unpenalized instead). Otherwise the factor is found by bisection on a log
 scale, and ``tol`` trades fits against how tightly the smallest qualifying
 factor is resolved.
 
@@ -271,7 +324,7 @@ an extreme discovery from an invalid estimate.
 
 .. automodule:: causarray.DR_estimation
    :members: estimate_propensity_scores, refit_propensity_scores,
-             tune_penalty_factor
+             tune_penalty_factor, select_propensity_factors
 
 .. automodule:: causarray.diagnostics
    :members:

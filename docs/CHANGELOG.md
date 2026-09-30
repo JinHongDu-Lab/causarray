@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.1.1]
+
+### Fixed
+
+- `LFC` no longer excludes genes whose arm means differ by less than
+  `thres_diff`, which is now only the floor before the logarithm. The filter
+  selected on the effect estimate: it dropped the pairs with p-values near 1
+  (about 10% of expressed pairs on a Perturb-seq negative control), so BH over
+  the remaining pairs was anti-conservative.
+- Size factors (`comp_size_factor`, used by `fit_gcate`, `LFC(offset=True)`
+  and `gcate_lfc_batch`) take the median of ratios over genes with mean count
+  of at least `min_mean=2` instead of every gene. In sparse single-cell data
+  the old factors captured about a third of the depth variation; the rest
+  shifted all highly expressed genes of an arm together, so their null
+  statistics were too spread. On a Replogle negative control (30 fake
+  perturbations cut from the controls) this cuts false discoveries from 114
+  to 14, and the null SD for genes above 5 counts per cell from 1.32 to
+  1.08. `min_mean=0` restores the old factors; `method='libsize'` uses total
+  counts. A cell with no counts in those genes gets its total count, rescaled
+  to the other cells' factors, instead of a factor near the median.
+- `comp_size_factor(method='scale')` returns one factor per row (total count
+  over `lib_size`); it returned one value per column.
+- `fit_gcate` now uses an `offset` array. The fit reads its offset from
+  `size_factor`, which was set only for `offset=True`, so a supplied array was
+  replaced by ones everywhere except the dispersion estimate.
+- `LFC` shows its per-treatment progress bar only with `verbose=True`.
+
+### Added
+
+- `select_propensity_factors` chooses the propensity covariates per
+  treatment: for a treatment whose weights concentrate (treated ESS < 0.5,
+  overlap < 0.3 or AUC > 0.9) it drops the covariates most imbalanced between
+  that treatment and the controls until its support recovers, and returns a
+  `drop_by_treatment` mapping for `refit_propensity_scores`. A treatment that
+  already meets the target keeps every covariate; when the target cannot be
+  reached, `on_infeasible` keeps the closest fit (`'best'`, default), drops
+  every candidate (`'all'`) or none (`'none'`).
+- `import causarray` warns when it runs in an Intel (x86_64) Python translated
+  by Rosetta 2 on an Apple Silicon Mac, where its numerical code runs several
+  times slower (`LFC` on a 5,000-cell subsample: 159 s against 32-57 s
+  natively). The README shows how to create a native environment.
+
+### Changed
+
+- **crispyx >= 0.1.6 is required.** With latent factors in the outcome model,
+  crispyx 0.1.5's structured GLM fitter was about 2.5 times slower than
+  0.1.6's (same estimates): 159 s against 62 s for LFC on 5,000 cells, 3,000
+  genes and 10 treatments.
+- `LFC(usevar='unequal')` is the by-arm Welch variance again (0.1.0 made it an
+  alias of `'pooled'`). It is conservative for small case-control designs: on
+  85 SEA-AD donors, permuted disease labels gave 0-1 false discoveries with
+  null SD 0.6-0.9, against SD 1.1-1.8 under `'pooled'`. `'pooled'` stays the
+  default; `'unequal'` over-inflates the standard errors of rare treatments.
+
 ## [0.1.0]
 
 Inference fix for small perturbation arms, and the GLM engine moves to crispyx

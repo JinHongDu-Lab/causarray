@@ -8,8 +8,7 @@ inputs, `results/` holds everything generated.
 
     sea_ad_case_control.ipynb reads data/sea_ad_mtg_exneu_pb.h5ad,
                               results/sea_ad_r.csv (JIC table),
-                              results/sea_ad_gcate.pkl (latent-factor fit),
-                              results/sea_ad_lfc.csv
+                              results/sea_ad_gcate.pkl (latent-factor fit)
 
 Everything here is tracked in git, including the fit caches, so the published
 tutorial renders without a refit. Regenerate `results/sea_ad_gcate.pkl` by

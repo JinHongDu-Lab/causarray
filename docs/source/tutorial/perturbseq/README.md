@@ -8,9 +8,8 @@ There is no prep script — the subset is committed directly.
     results/perturbseq-r.csv     JIC rank-selection table, read by both tutorials
 
     perturbseq-py.ipynb          Python tutorial
-    perturbseq-r.Rmd             R tutorial; knit to perturbseq-r.md
+    perturbseq-r.Rmd             R tutorial (same workflow via reticulate); knit to perturbseq-r.md
     perturbseq-r_files/          figures produced by knitting the Rmd
-    perturbseq_files/            figures from an earlier render name
 
 Everything here is tracked in git. Both tutorials are published in
 `docs/source/index.rst`.

@@ -120,8 +120,7 @@ def compute_causal_estimand(
     ps_class_weight : str, dict or None
         Class weighting for the propensity model. ``None`` (default) fits
         calibrated treatment probabilities, which is what the AIPW weights
-        ``A / pi`` require. ``'balanced'`` is the pre-0.1.0 default and is kept
-        as a legacy option; it centres scores near 0.5 regardless of prevalence
+        ``A / pi`` require. ``'balanced'`` is kept as a legacy option; it centres scores near 0.5 regardless of prevalence
         and turns the estimator into an outcome-model plug-in.
 
         .. versionchanged:: 0.1.0
@@ -152,8 +151,8 @@ def compute_causal_estimand(
         a fifth dictionary whose arrays are added as diagnostic columns. The
         frame also carries per-pair support columns ``n_treated``,
         ``n_control``, ``count_treated`` and ``count_control`` (cells and raw
-        summed counts in each arm), added in 0.1.0 so that arms with no
-        observed counts can be audited without recomputation.
+        summed counts in each arm), so that arms with no observed counts can be
+        audited without recomputation.
     """
     reset_random_seeds(random_state)
 
@@ -275,7 +274,7 @@ def compute_causal_estimand(
     res = []
     _count_control_shared = None
     _small_arm_floored = {}
-    iters = range(A.shape[1]) if A.shape[1]==1 else tqdm(range(A.shape[1]))
+    iters = tqdm(range(A.shape[1])) if verbose and A.shape[1] > 1 else range(A.shape[1])
     for j in iters:
         if mask is not None:
             i_cells = mask[:, j]
@@ -381,7 +380,7 @@ def compute_causal_estimand(
 def LFC(
     Y, W, A, W_A=None, family='nb', offset=False,
     Y_hat=None, pi_hat=None, cross_est=False, K=None, mask=None,
-    usevar: Literal['pooled'] = 'pooled',
+    usevar: Literal['pooled', 'unequal'] = 'pooled',
     thres_min='auto', thres_diff=1e-2, eps_var=None, min_counts=5.0,
     fdx=False, fdx_alpha=0.05, fdx_c=0.1,
     verbose=False, backend: str = "auto", ps_clip='auto',
@@ -423,9 +422,9 @@ def LFC(
     mask : array or None, shape (n, a)
         Boolean mask indicating eligible cells for each treatment. It limits
         propensity-model fitting and final estimand computation.
-    usevar : str
-        Variance estimator for the AIPW pseudo-outcomes. Only ``'pooled'``
-        remains: the influence-function (sandwich) variance ``var(eta) / n``
+    usevar : {'pooled', 'unequal'}
+        Variance estimator for the AIPW pseudo-outcomes. ``'pooled'``
+        (default) is the influence-function (sandwich) variance ``var(eta) / n``
         of the estimator, where ``eta`` are the per-cell influence values of
         the log-ratio and ``n`` counts every cell entering the estimand. With
         calibrated propensity scores this equals the efficient two-sample form
@@ -435,20 +434,23 @@ def LFC(
         ``n/(n-d)`` and p-values use a t reference with ``n-d`` degrees of
         freedom (see Notes).
 
-        ``'unequal'`` (the 0.0.6-0.0.9 default) applied a two-sample Welch
-        formula ``s₀²/n₀ + s₁²/n₁`` by arm. That is not the variance of an
-        estimator that averages pseudo-outcomes over all cells: for equal arm
-        sizes it is exactly twice the correct standard error, and for a rare
-        treatment fitted with class-balanced propensity scores it is an order
-        of magnitude too large. It was removed in 0.1.0 after validation on
-        the Perturb-seq, SEA-AD and Adamson tutorials; the argument is
-        accepted as an alias of ``'pooled'`` with a ``FutureWarning`` for one
-        release.
+        ``'unequal'`` is the by-arm Welch variance ``s₀²/n₀ + s₁²/n₁`` of the
+        influence values, with Welch-Satterthwaite degrees of freedom. It is
+        not the variance of an estimator that averages pseudo-outcomes over
+        all rows: it roughly doubles the standard error for equal arms and
+        inflates it far more for rare treatments, so do not use it for
+        perturbation screens. For small, roughly balanced case-control designs
+        (for example donor-level pseudo-bulk), where ``'pooled'`` can be
+        anti-conservative, it is the more conservative choice; check either
+        on permuted labels before relying on it.
 
         Neither estimator models within-donor or within-subject correlation.
         Repeated cells from the same biological unit should still be
         pseudo-bulked or analysed with a cluster-aware method.
 
+        .. versionchanged:: 0.1.1
+            ``'unequal'`` restored as a conservative option for small
+            case-control designs.
         .. versionchanged:: 0.1.0
             ``'unequal'`` removed; ``'pooled'`` is the only estimator.
         .. versionchanged:: 0.0.6
@@ -473,8 +475,13 @@ def LFC(
 
         .. versionadded:: 0.1.0
     thres_diff : float
-        Floor applied to each arm mean before the logarithm, and the minimum
-        absolute difference between arm means for a gene to be tested.
+        Floor applied to each arm mean before the logarithm.
+
+        .. versionchanged:: 0.1.1
+            No longer also excludes genes whose arm means differ by less than
+            ``thres_diff``. That filter selected on the effect estimate: the
+            pairs it removed had p-values near 1, so BH over the rest was
+            anti-conservative.
     eps_var : None
         Deprecated and ignored. A model-based variance floor (see Notes)
         replaces the additive constant.
@@ -504,7 +511,7 @@ def LFC(
     ps_class_weight : str, dict or None
         Class weighting for the propensity model. ``None`` (default) gives
         calibrated probabilities, which the AIPW weights ``A / pi`` require.
-        ``'balanced'`` (pre-0.1.0 default) centres scores near 0.5 whatever
+        ``'balanced'`` centres scores near 0.5 whatever
         the prevalence, shrinking the AIPW correction term by roughly twice
         the prevalence and turning the estimator into an outcome-model
         plug-in whose uncertainty the influence function no longer reflects.
@@ -536,7 +543,7 @@ def LFC(
 
     Notes
     -----
-    **Model-based variance floor (0.1.0).** The empirical influence-function
+    **Model-based variance floor.** The empirical influence-function
     variance of an arm whose cells all have zero counts is zero, and the
     logarithm of its floored mean ``max(mean, thres_diff)`` is then reported
     with a spuriously tiny standard error. A mean estimated from ``n_k`` cells
@@ -551,42 +558,29 @@ def LFC(
     significant. An arm with no observed counts is kept estimable at the
     floor ``thres_diff`` (its AIPW mean is exactly zero), so complete
     knockouts of expressed genes are reported rather than dropped as
-    non-estimable. The SCARF tutorial documents the failure this prevents.
+    non-estimable.
 
-    **Expression threshold (0.1.0).** ``thres_min='auto'`` requires about
+    **Expression threshold.** ``thres_min='auto'`` requires about
     ``min_counts`` (5) expected counts in the smaller arm, i.e. a larger-arm
     mean of at least ``5 / min(n_0, n_1)`` counts per cell. Below that level a
     handful of counts in the small arm yields large positively skewed
-    statistics under the null (SCARF and Adamson negative controls); above it
-    the variance floor suffices.
+    statistics under the null; above it the variance floor suffices.
 
-    **Small-sample correction (0.1.0).** With in-sample nuisance fits
+    **Small-sample correction.** With in-sample nuisance fits
     (``K=1``) the pooled variance is multiplied by ``n / (n - d)``, where ``d``
     is the number of outcome-model parameters (``W.shape[1] + 1``), and
     p-values use a t reference with ``n - d`` degrees of freedom. Both are
-    no-ops for large ``n``; on 85-donor pseudo-bulk data and 100-cell
-    perturbation arms they bring the null t-statistics from SD ≈ 1.08-1.10 to
-    ≈ 1.0 (label-permutation and fake-perturbation nulls on the SEA-AD and
-    Perturb-seq tutorials).
+    no-ops for large ``n`` and bring the spread of null t-statistics closer
+    to one for designs with tens of units or arms of about a hundred cells.
     """
     if eps_var is not None:
         warnings.warn(
-            'eps_var is deprecated and ignored since 0.1.0; a model-based '
-            'variance floor replaces the additive constant.',
+            'eps_var is deprecated and ignored; a model-based variance floor '
+            'replaces the additive constant.',
             FutureWarning, stacklevel=2,
         )
-    if usevar == 'unequal':
-        warnings.warn(
-            "usevar='unequal' (the 0.0.6-0.0.9 Welch-by-arm formula) was removed in "
-            "0.1.0 after validation on the Perturb-seq, SEA-AD and Adamson tutorials: "
-            "it is not the variance of the AIPW estimator (2x the correct SE for equal "
-            "arms, far larger for rare treatments). The argument is accepted as an alias "
-            "of 'pooled' for one release and will then raise.",
-            FutureWarning, stacklevel=2,
-        )
-        usevar = 'pooled'
-    elif usevar != 'pooled':
-        raise ValueError("usevar must be 'pooled'")
+    if usevar not in ('pooled', 'unequal'):
+        raise ValueError("usevar must be 'pooled' or 'unequal'")
 
     def estimand(etas, A, **kwargs):
         eta_0, eta_1 = etas[..., 0], etas[..., 1]
@@ -595,7 +589,7 @@ def LFC(
         finite_means = np.isfinite(mean_0) & np.isfinite(mean_1)
         # An arm whose observed counts are all zero has an AIPW mean of
         # exactly zero (or numerically negative) although the gene may be a
-        # genuine complete knockout.  Since 0.1.0 such arms stay estimable at
+        # genuine complete knockout.  Such arms stay estimable at
         # the floor ``thres_diff`` and inherit the model-based variance floor;
         # the observed-support threshold below removes the cases where the
         # other arm is too sparse to support the comparison.  Nonpositive
@@ -623,17 +617,26 @@ def LFC(
         n_params = int(kwargs.get('_n_params', 1))
         in_sample = bool(kwargs.get('_in_sample', True))
         df_resid = max(n_cells - n_params, 2)
-        var_est = np.var(eta_est, axis=0, ddof=1) / n_cells
-        if in_sample:
-            # Residuals of an outcome model fitted on the same cells are
-            # deflated by ~(n - d)/n; rescale (HC1-style) so that small
-            # designs (donor-level pseudo-bulk, ~100-cell arms) are not
-            # anti-conservative.  Cross-fitted nuisances (K > 1) need no
-            # rescaling.
-            var_est = var_est * (n_cells / df_resid)
-        # t reference with residual degrees of freedom; equals the normal
-        # reference for large n.
-        df_eff = np.full(var_est.shape, float(df_resid))
+        if usevar == 'unequal':
+            # Welch variance s0^2/n0 + s1^2/n1 of the influence values by arm,
+            # with Welch-Satterthwaite degrees of freedom.
+            with np.errstate(invalid='ignore', divide='ignore'):
+                v0 = np.var(eta_est[A == 0], axis=0, ddof=1) / max(n_0, 1)
+                v1 = np.var(eta_est[A == 1], axis=0, ddof=1) / max(n_1, 1)
+                var_est = v0 + v1
+                df_eff = (v0 + v1) ** 2 / (v0 ** 2 / max(n_0 - 1, 1) + v1 ** 2 / max(n_1 - 1, 1))
+        else:
+            var_est = np.var(eta_est, axis=0, ddof=1) / n_cells
+            if in_sample:
+                # Residuals of an outcome model fitted on the same cells are
+                # deflated by ~(n - d)/n; rescale (HC1-style) so that small
+                # designs (donor-level pseudo-bulk, ~100-cell arms) are not
+                # anti-conservative.  Cross-fitted nuisances (K > 1) need no
+                # rescaling.
+                var_est = var_est * (n_cells / df_resid)
+            # t reference with residual degrees of freedom; equals the normal
+            # reference for large n.
+            df_eff = np.full(var_est.shape, float(df_resid))
 
         # Under the working Poisson model Y_i ~ Poisson(s_i * tau_k),
         # Var(Y_i / s_i) = tau_k / s_i. The unweighted arm mean thus has
@@ -664,11 +667,10 @@ def LFC(
         low_support = np.maximum(mean_0, mean_1) < thres_min_j
         if obs_mean_1 is not None and obs_mean_0 is not None:
             low_support |= np.maximum(np.asarray(obs_mean_0), np.asarray(obs_mean_1)) < thres_min_j
-        idx = (
-            ~estimable |
-            low_support |
-            (np.abs(mean_1 - mean_0) < thres_diff)
-        )
+        # No filter on |mean_1 - mean_0|: it would select on the effect
+        # estimate itself, dropping exactly the pairs with p-values near 1 and
+        # making BH over the remaining pairs anti-conservative.
+        idx = ~estimable | low_support
         tau_est[idx] = 0.; eta_est[:,idx] = 0.; var_est[idx] = np.inf
         if df_eff is not None:
             df_eff[idx] = np.nan
@@ -1022,10 +1024,7 @@ def gcate_lfc_batch(
 
     lfc_kwargs : dict or None
         Extra keyword arguments forwarded to :func:`LFC`
-        (e.g. ``fdx``, ``thres_min``). Since 0.1.0 the influence-function
-        variance (``usevar='pooled'``) is the only estimator and applies to
-        balanced and unbalanced arms alike; ``usevar='unequal'`` is accepted
-        as a deprecated alias (see :func:`LFC`).
+        (e.g. ``fdx``, ``thres_min``).
     **kwargs
         Additional arguments forwarded to both :func:`fit_gcate_batch` and
         :func:`LFC`.  When a key collides with ``gcate_kwargs`` /

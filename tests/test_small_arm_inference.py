@@ -1,8 +1,5 @@
 """
-Stage 0 tests for the 0.1.0 inference fix.
-
-They pin the behaviour that the SCARF investigation showed was wrong before
-0.1.0:
+Inference for small perturbation arms that share a large control pool:
 
 (a) the reported standard error matches the estimator's true sampling SD
     under an oracle outcome model, for rare and common treatments;
@@ -15,6 +12,8 @@ They pin the behaviour that the SCARF investigation showed was wrong before
     propensity weighting;
 (f) the prevalence-aware clip does not clip calibrated scores of a rare
     treatment wholesale, and the support columns report raw counts.
+(g) size factors follow sequencing depth, so highly expressed genes do not
+    shift together when random arms differ in average depth.
 """
 
 import warnings
@@ -281,7 +280,7 @@ def test_auto_expression_threshold_scales_with_smaller_arm():
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             df, _ = LFC(Y, np.ones((n, 1)), A, family='poisson', offset=False, backend='fast',
-                        thres_diff=0)          # isolate thres_min from the mean-difference filter
+                        thres_diff=0)
         sparse = df.iloc[10:]
         tested = np.isfinite(sparse['std']).mean()
         assert (tested > 0.5) == expect_tested, f'n1={n1}: tested fraction {tested:.2f}'
@@ -318,3 +317,101 @@ def test_threshold_uses_observed_support_not_model_means():
     assert df.loc[2, 'estimable'] and df.loc[2, 'var_floored'], 'complete knockout must stay estimable at the floor'
     assert df.loc[2, 'padj'] < 0.05 and df.loc[2, 'tau'] < -3
     assert df.loc[3, 'padj'] < 0.05 and df.loc[3, 'tau'] < -3
+
+
+def test_equal_arm_means_are_tested_and_counted_in_bh():
+    """Genes whose arm means barely differ stay in the BH family.
+
+    Excluding them (the former ``|mean_1 - mean_0| < thres_diff`` filter)
+    selects on the effect estimate: it drops exactly the p-values near 1, so
+    BH over the remaining genes becomes anti-conservative.
+    """
+    rng = np.random.default_rng(11)
+    n0, n1, p = 2000, 200, 40
+    n = n0 + n1
+    A = np.r_[np.zeros(n0), np.ones(n1)]
+    Y = _nb_counts(rng, np.full((n, p), 2.0), 4.0)
+    Y[:, 0] = 2.0                               # identical arm means
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        df, _ = LFC(Y, np.ones((n, 1)), A, family='poisson', offset=False,
+                    backend='fast', ps_clip=None)
+    assert np.isfinite(df['std']).all()
+    assert df.loc[0, 'tau'] == pytest.approx(0.0, abs=1e-12)
+    assert df.loc[0, 'pvalue'] == pytest.approx(1.0, abs=1e-6)
+    # every gene is part of the BH family
+    assert df['padj'].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# (g) size factors follow sequencing depth
+# ---------------------------------------------------------------------------
+
+def test_default_size_factors_track_depth_and_resist_composition():
+    """The default median of ratios uses well-expressed genes: it follows
+    sequencing depth in sparse data and ignores a shift in a minority of genes."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(12)
+    n = 400
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(150, 5.0), np.full(850, 0.2)]
+    Y = rng.poisson(depth[:, None] * mu[None, :]).astype(float)
+    log_depth = np.log(depth) - np.log(depth).mean()
+    assert np.corrcoef(np.log(comp_size_factor(Y)), log_depth)[0, 1] > 0.95
+    assert np.corrcoef(np.log(comp_size_factor(Y, min_mean=0)), log_depth)[0, 1] < 0.9
+    # a 4x increase in 20% of the expressed genes in half the cells
+    Y2 = Y.copy()
+    Y2[:n // 2, :30] = rng.poisson(4 * depth[:n // 2, None] * 5.0)
+    shift = np.log(comp_size_factor(Y2))[:n // 2].mean() - np.log(comp_size_factor(Y2))[n // 2:].mean()
+    libsize_shift = (np.log(comp_size_factor(Y2, method='libsize'))[:n // 2].mean()
+                     - np.log(comp_size_factor(Y2, method='libsize'))[n // 2:].mean())
+    assert abs(shift) < abs(libsize_shift)
+    Y2[3] = 0.0
+    assert comp_size_factor(Y2)[3] == 0.0
+
+
+def test_size_factor_of_a_cell_without_well_expressed_counts():
+    """A cell with counts only in sparse genes gets a size factor in line
+    with its total count, not one near the median cell."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(12)
+    n = 400
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(150, 5.0), np.full(850, 0.2)]
+    Y = rng.poisson(depth[:, None] * mu[None, :]).astype(float)
+    Y[0] = 0.0
+    Y[0, 150:155] = 1.0                       # 5 counts, all in sparse genes
+    sf = comp_size_factor(Y)
+    rel_total = Y[0].sum() / np.median(Y.sum(axis=1))
+    assert sf[0] == pytest.approx(rel_total * np.median(sf), rel=0.25)
+    assert sf[0] < 0.05
+    scale = comp_size_factor(Y, method='scale', lib_size=1e3)
+    assert scale.shape == (n,)
+    np.testing.assert_allclose(Y.sum(axis=1) / scale, 1e3)
+
+
+def test_highly_expressed_genes_do_not_shift_with_arm_depth():
+    """Random arms differ in average depth by chance. With median-of-ratios
+    size factors over every gene, most of that depth stays in highly expressed
+    genes and moves all of them together, one shared shift per arm; the
+    default, which uses well-expressed genes only, removes it."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(0)
+    n0, n1, a, n_high = 1500, 130, 12, 300
+    n = n0 + n1 * a
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(n_high, 5.0), np.full(700, 0.3)]
+    Y = rng.poisson(depth[:, None] * mu[None, :] * rng.gamma(10, 0.1, (n, mu.size))).astype(float)
+    A = np.zeros((n, a))
+    for k in range(a):
+        A[n0 + k * n1:n0 + (k + 1) * n1, k] = 1
+    shift = {}
+    for label, min_mean in (('default', 2.0), ('all genes', 0.0)):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            df, _ = LFC(Y, np.ones((n, 1)), A, np.ones((n, 1)), family='nb', backend='fast',
+                        offset=np.log(comp_size_factor(Y, min_mean=min_mean)))
+        z = df['stat'].to_numpy().reshape(a, -1)[:, :n_high]
+        shift[label] = np.nanstd(np.nanmean(z, axis=1))
+    assert shift['default'] < 0.2, shift
+    assert shift['all genes'] > 2 * shift['default'], shift

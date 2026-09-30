@@ -143,9 +143,9 @@ def estimate_disp_fast(
     X : (n, d) array
         Covariates, including the intercept.
     A : (n, a) array, optional
-        Treatment indicators.  They stay in the dispersion model: dropping
-        them lowers the estimated size parameter by about 13% on the Replogle
-        screen and moves the downstream results (measured 2026-09-21).
+        Treatment indicators.  They stay in the dispersion model: without
+        them, treatment effects are absorbed into the dispersion and the size
+        parameter is underestimated.
     offset : (n,) array, optional
         Log-scale offset.
     method : str
@@ -265,11 +265,6 @@ def fit_glm_fast(
     and by its dense batch fitter otherwise.  Parameters and returns are
     identical to :func:`causarray.gcate_glm.fit_glm`; ``family='gaussian'``
     is delegated to it, as are ``shrinkage`` fits.
-
-    Measured on the Perturb-seq tutorial (29 perturbations, 2,926 cells,
-    3,221 genes, 2026-09-21): 10.7 s against 46.8 s for the statsmodels pool,
-    tau correlation 0.9987 against it, 7,460 of 7,468 / 7,482 discoveries
-    shared.
     """
     np.random.seed(random_state)
 

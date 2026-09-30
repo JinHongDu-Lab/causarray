@@ -7,4 +7,6 @@ dependencies:
   - r-rmarkdown
   - r-knitr
   - r-seurat>=5
+  - r-dplyr
+  - r-ggplot2
   - pandoc

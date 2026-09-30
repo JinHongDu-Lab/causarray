@@ -28,13 +28,20 @@ def _check_input(Y, X, family, disp_glm, disp_family, offset, c1, **kwargs):
     kwargs_glm = {}
     kwargs_glm['family'] = family
 
+    if offset is False:
+        offset = None
     if offset is not None:
         if type(offset)==bool and offset is True:
             size_factor = comp_size_factor(Y, **_filter_params(comp_size_factor, kwargs))
             kwargs_glm['size_factor'] = size_factor
             offset = np.log(size_factor)
         else:
-            offset = np.asarray(offset)
+            offset = np.asarray(offset, dtype=float).ravel()
+            if offset.shape != (n,) or not np.all(np.isfinite(offset)):
+                raise ValueError('offset must be a finite array with one value per row of Y')
+            # The fit reads the offset from ``size_factor``; without this a
+            # supplied offset array was ignored everywhere but the dispersion.
+            kwargs_glm['size_factor'] = np.exp(offset)
     else:
         offset = None
     if kwargs_glm['family']=='nb':

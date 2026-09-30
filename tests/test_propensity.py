@@ -15,6 +15,7 @@ from causarray import (
     LFC,
     estimate_propensity_scores,
     tune_penalty_factor,
+    select_propensity_factors,
     plot_propensity_scores,
     plot_treatment_associations,
     refit_propensity_scores,
@@ -29,7 +30,7 @@ def test_intercept_only_scores_respect_class_weight():
     A[60:80, 0] = 1
     A[80:100, 1] = 1
 
-    # Since 0.1.0 the default is calibrated; 'balanced' is the legacy option.
+    # The default is calibrated; 'balanced' is the legacy option.
     calibrated = estimate_propensity_scores(A, np.ones((100, 1)))
     balanced = estimate_propensity_scores(
         A, np.ones((100, 1)), class_weight='balanced')
@@ -685,3 +686,94 @@ def test_tune_penalty_factor_scores_only_masked_cells():
     got = report.set_index('treatment').loc['benign_arm', 'auc_unpenalized']
     assert got == pytest.approx(expected)
 
+
+
+# ---------------------------------------------------------------------------
+# select_propensity_factors
+# ---------------------------------------------------------------------------
+
+def test_select_propensity_factors_drops_the_imbalanced_covariate_first():
+    A, X_A, names, cov, _ = _separating_design()
+    drops, report = select_propensity_factors(
+        A, X_A, treatment_names=names, covariate_names=cov, random_state=0)
+    assert drops == {'sep_arm': ['driver']}
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['target_met']
+    assert row['n_fits'] == 2
+    assert row['auc_all'] > 0.9
+    assert row['overlap_ratio_chosen'] > 0.3
+    assert 'benign_arm' not in report['treatment'].tolist()
+
+
+def test_select_propensity_factors_leaves_other_arms_and_the_intercept():
+    A, X_A, names, cov, _ = _separating_design()
+    base = estimate_propensity_scores(A, X_A, K=1, clip=None, random_state=0)
+    drops, _ = select_propensity_factors(
+        A, X_A, treatment_names=names, covariate_names=cov,
+        target={'auc_lt': 0.0}, on_infeasible='all', random_state=0)   # unreachable
+    assert drops['sep_arm'] == ['driver', 'noise']             # intercept kept
+    updated, _ = refit_propensity_scores(
+        A, X_A, pi_hat=base.copy(), treatment_names=names, covariate_names=cov,
+        drop_by_treatment=drops, K=1, clip=None, random_state=0)
+    j = names.index('benign_arm')
+    np.testing.assert_array_equal(base[:, j], updated[:, j])
+
+
+def test_select_propensity_factors_respects_candidates():
+    A, X_A, names, cov, _ = _separating_design()
+    drops, report = select_propensity_factors(
+        A, X_A, candidates=['noise'], treatment_names=names, covariate_names=cov,
+        on_infeasible='all', random_state=0)
+    assert drops == {'sep_arm': ['noise']}
+    assert not report.set_index('treatment').loc['sep_arm', 'target_met']
+    with pytest.raises(ValueError, match='candidate'):
+        select_propensity_factors(A, X_A, candidates=['missing'],
+                                  treatment_names=names, covariate_names=cov)
+
+
+def test_select_propensity_factors_keeps_an_arm_that_already_meets_target():
+    A, X_A, names, cov, _ = _separating_design()
+    drops, report = select_propensity_factors(
+        A, X_A, treatment_names=names, covariate_names=cov,
+        trigger={'auc_gt': 0.0}, random_state=0)               # triggers every arm
+    assert 'benign_arm' not in drops
+    row = report.set_index('treatment').loc['benign_arm']
+    assert row['target_met'] and row['n_dropped'] == 0 and row['n_fits'] == 1
+
+
+def test_select_propensity_factors_on_infeasible():
+    A, X_A, names, cov, _ = _separating_design()
+    # Only the driver may go, and no fit reaches AUC < 0: the target is infeasible.
+    common = dict(candidates=['driver'], treatment_names=names, covariate_names=cov,
+                  target={'overlap_ratio_gt': 0.3, 'auc_lt': 0.0}, random_state=0)
+    drops, report = select_propensity_factors(A, X_A, on_infeasible='none', **common)
+    assert 'sep_arm' not in drops
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['n_dropped'] == 0 and row['n_fits'] == 2 and not row['target_met']
+    # 'best' keeps the fit meeting more conditions: without the driver, overlap recovers
+    drops, report = select_propensity_factors(A, X_A, **common)
+    assert drops == {'sep_arm': ['driver']}
+    row = report.set_index('treatment').loc['sep_arm']
+    assert row['overlap_ratio_chosen'] > 0.3 and not row['target_met']
+    with pytest.raises(ValueError, match='on_infeasible'):
+        select_propensity_factors(A, X_A, on_infeasible='bad', **common)
+
+
+def test_select_propensity_factors_ranks_imbalance_on_masked_cells():
+    rng = np.random.default_rng(1)
+    n = 400
+    A = np.zeros((n, 1))
+    A[:40, 0] = 1
+    ctrl_out = np.arange(n) >= 200            # controls outside the mask
+    shifted = rng.normal(0, 1, n)
+    shifted[ctrl_out] += 10.0                 # imbalanced only through excluded controls
+    driver = rng.normal(0, 1, n)
+    driver[:40] += 0.8
+    X_A = np.column_stack([np.ones(n), shifted, driver])
+    cov = ['intercept', 'shifted', 'driver']
+    common = dict(treatment_names=['arm'], covariate_names=cov, trigger={'auc_gt': 0.0},
+                  target={'auc_lt': 0.0}, on_infeasible='all', random_state=0)
+    drops, _ = select_propensity_factors(A, X_A, **common)
+    assert drops['arm'][0] == 'shifted'
+    drops, _ = select_propensity_factors(A, X_A, mask=~ctrl_out[:, None], **common)
+    assert drops['arm'][0] == 'driver'

@@ -73,8 +73,8 @@ def estimate_propensity_scores(
     ``K > 1``, every returned score is predicted by a model that did not train
     on that cell. Logistic models return calibrated treatment probabilities
     (``class_weight=None``) by default, matching :func:`LFC`. Pass
-    ``class_weight='balanced'`` to reproduce pre-0.1.0 fits, whose scores are
-    centred near 0.5 regardless of prevalence.
+    ``class_weight='balanced'`` for scores centred near 0.5 regardless of
+    prevalence.
 
     .. versionchanged:: 0.1.0
         Default ``class_weight`` changed from ``'balanced'`` to ``None``.
@@ -100,7 +100,7 @@ def estimate_propensity_scores(
     class_weight : str, dict or None, optional
         Class weighting for logistic propensity estimation. ``None`` (default)
         gives calibrated probabilities and matches :func:`LFC`;
-        ``'balanced'`` reproduces the pre-0.1.0 behaviour.
+        ``'balanced'`` centres scores near 0.5.
 
     Returns
     -------
@@ -462,6 +462,186 @@ def tune_penalty_factor(
     return factors, report
 
 
+def select_propensity_factors(
+    A, X_A, candidates=None, treatment_names=None, covariate_names=None,
+    trigger=None, target=None, on_infeasible='best',
+    K=1, ps_model='logistic', mask=None, random_state=0, verbose=False,
+    class_weight=None, **kwargs,
+):
+    """Drop, per treatment, the covariates that concentrate its weights.
+
+    Latent factors estimated from expression can track a perturbation's own
+    effect. When they do, the propensity model partly separates that arm from
+    the controls and the inverse-probability weights pile onto the treated
+    cells that look least affected. This starts from every covariate and, for
+    each treatment whose support fails ``trigger`` but not already ``target``,
+    removes the candidate most imbalanced between that treatment and the
+    controls (largest absolute standardized mean difference), refits that
+    treatment alone, and repeats until ``target`` holds or no candidate is
+    left. Other treatments keep every covariate.
+
+    It is the discrete counterpart of :func:`tune_penalty_factor`: a penalty
+    shrinks one named coefficient, while this chooses which covariates stay.
+    Neither makes a contrast identified when a covariate is affected by
+    treatment; the rule only keeps the weights from resting on a few cells.
+
+    Parameters
+    ----------
+    A : array-like, shape (n,) or (n, a)
+        Binary treatment indicators; all-zero rows are the shared controls.
+    X_A : array-like, shape (n, d_A)
+        Propensity covariates, including the intercept column.
+    candidates : sequence or None
+        Covariates that may be dropped, by name or index. Defaults to every
+        non-constant column, so the intercept always stays.
+    treatment_names, covariate_names : sequence, optional
+        Labels for ``A`` columns and ``X_A`` columns.
+    trigger : mapping or None
+        Conditions selecting the treatments to adjust, as for
+        :func:`tune_penalty_factor`; a treatment is adjusted when **any**
+        holds. Defaults to ``{'ess_treated_fraction_lt': 0.5,
+        'overlap_ratio_lt': 0.3, 'auc_gt': 0.9}``.
+    target : mapping or None
+        Conditions that stop the removal, combined with **and**. Defaults to
+        ``{'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}``. A
+        triggered treatment that already meets ``target`` keeps every
+        covariate.
+    on_infeasible : {'best', 'all', 'none'}
+        What to do when ``target`` is not met even after every candidate is
+        dropped. ``'best'`` (default) keeps the fit, among those tried
+        (including the one with every covariate), that meets the most
+        ``target`` conditions, breaking ties by the larger treated ESS
+        fraction. ``'all'`` drops every candidate. ``'none'`` keeps every
+        covariate.
+    K, ps_model, mask, random_state, verbose, class_weight, **kwargs
+        Passed to :func:`estimate_propensity_scores` for every fit. With
+        ``mask``, the imbalance ranking and the support metrics both use only
+        the eligible cells of each treatment.
+
+    Returns
+    -------
+    drop_by_treatment : dict
+        ``{treatment: [covariate, ...]}`` for the treatments that lose at
+        least one covariate, ready to hand to :func:`refit_propensity_scores`.
+    report : DataFrame
+        One row per triggered treatment with the covariates dropped in order,
+        whether ``target`` was met, the number of fits, and the support
+        metrics with every covariate (``_all``) and with the chosen covariates
+        (``_chosen``).
+
+    Examples
+    --------
+    >>> drops, report = select_propensity_factors(
+    ...     A, X_A, treatment_names=names, covariate_names=cov)  # doctest: +SKIP
+    >>> pi, _ = refit_propensity_scores(
+    ...     A, X_A, pi_hat=pi, treatment_names=names, covariate_names=cov,
+    ...     drop_by_treatment=drops)  # doctest: +SKIP
+
+    .. versionadded:: 0.1.1
+    """
+    trigger = ({'ess_treated_fraction_lt': 0.5, 'overlap_ratio_lt': 0.3, 'auc_gt': 0.9}
+               if trigger is None else dict(trigger))
+    target = ({'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}
+              if target is None else dict(target))
+
+    A_arr = np.asarray(A, dtype=float)
+    if A_arr.ndim == 1:
+        A_arr = A_arr[:, None]
+    X_arr = np.asarray(X_A, dtype=float)
+    if treatment_names is None:
+        treatment_names = (list(A.columns) if hasattr(A, 'columns')
+                           else list(range(A_arr.shape[1])))
+    treatment_names = list(treatment_names)
+    if covariate_names is None:
+        covariate_names = (list(X_A.columns) if hasattr(X_A, 'columns')
+                           else [f'covariate_{j + 1}' for j in range(X_arr.shape[1])])
+    covariate_names = list(covariate_names)
+    if candidates is None:
+        candidates = [c for c, col in zip(covariate_names, X_arr.T) if np.ptp(col) > 0]
+    else:
+        resolved = []
+        for c in candidates:
+            if c in covariate_names:
+                resolved.append(c)
+            elif isinstance(c, (int, np.integer)) and 0 <= c < len(covariate_names):
+                resolved.append(covariate_names[c])
+            else:
+                raise ValueError(f'candidate {c!r} is not in covariate_names')
+        candidates = resolved
+    cand_idx = [covariate_names.index(c) for c in candidates]
+
+    mask_arr = None
+    if mask is not None:
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.ndim == 1:
+            mask_arr = mask_arr[:, None]
+    if on_infeasible not in ('best', 'all', 'none'):
+        raise ValueError("on_infeasible must be 'best', 'all' or 'none'")
+    fit_kwargs = dict(K=K, ps_model=ps_model, mask=mask, clip=None,
+                      random_state=random_state, verbose=False,
+                      class_weight=class_weight, **kwargs)
+    pi = estimate_propensity_scores(A_arr, X_arr, **fit_kwargs)
+    ctrl = A_arr.sum(axis=1) == 0
+
+    def imbalance_order(j):
+        case = A_arr[:, j] == 1
+        c_rows, t_rows = ctrl, case
+        if mask_arr is not None:
+            c_rows, t_rows = ctrl & mask_arr[:, j], case & mask_arr[:, j]
+        smd = []
+        for k in cand_idx:
+            c_vals, t_vals = X_arr[c_rows, k], X_arr[t_rows, k]
+            sd = np.sqrt((np.var(c_vals, ddof=1) + np.var(t_vals, ddof=1)) / 2)
+            smd.append(abs(np.mean(t_vals) - np.mean(c_vals)) / sd if sd > 0 else 0.0)
+        return [candidates[i] for i in np.argsort(smd)[::-1]]
+
+    def closeness(metrics):
+        n_met = sum(_meets(metrics, {key: bound}) for key, bound in target.items())
+        ess = metrics['ess_treated_fraction']
+        return n_met, ess if np.isfinite(ess) else -np.inf
+
+    rows, drops = [], {}
+    for j, name in enumerate(treatment_names):
+        before = _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
+        if not any(_meets(before, {key: bound}) for key, bound in trigger.items()):
+            continue
+        # Each fit tried: (covariates dropped, metrics, scores of arm j).
+        tried = [([], before, pi[:, j].copy())]
+        if not _meets(before, target):
+            for covariate in imbalance_order(j):
+                dropped = tried[-1][0] + [covariate]
+                pi_try, _ = refit_propensity_scores(
+                    A_arr, X_arr, pi_hat=pi.copy(), treatment_names=treatment_names,
+                    covariate_names=covariate_names,
+                    drop_by_treatment={name: dropped}, **fit_kwargs)
+                tried.append((dropped, _arm_support_metrics(A_arr, pi_try, j, mask=mask_arr),
+                              pi_try[:, j]))
+                if _meets(tried[-1][1], target):
+                    break
+        if _meets(tried[-1][1], target) or on_infeasible == 'all':
+            dropped, chosen, pi_j = tried[-1]
+        elif on_infeasible == 'none':
+            dropped, chosen, pi_j = tried[0]
+        else:
+            dropped, chosen, pi_j = max(tried, key=lambda t: closeness(t[1]))
+        pi[:, j] = pi_j
+        if dropped:
+            drops[name] = list(dropped)
+        rows.append({'treatment': name, 'dropped': ','.join(dropped),
+                     'n_dropped': len(dropped), 'target_met': _meets(chosen, target),
+                     'n_fits': len(tried),
+                     **{f'{k}_all': v for k, v in before.items()},
+                     **{f'{k}_chosen': v for k, v in chosen.items()}})
+
+    report = pd.DataFrame(rows)
+    if verbose and len(report):
+        print(f'[select_propensity_factors] {len(report)} treatments triggered, '
+              f'{len(drops)} adjusted, '
+              f'{int(report.target_met.sum())} met the target, '
+              f'{report.n_fits.sum()} fits', flush=True)
+    return drops, report
+
+
 def refit_propensity_scores(
     A, X_A, drop_by_treatment=None, pi_hat=None, treatment_names=None,
     covariate_names=None, penalty_factors_by_treatment=None, K=1,
@@ -761,9 +941,9 @@ def cross_fitting(
     ps_model : str, optional
         The propensity score model. The default is 'logistic'.
     ps_class_weight : str, dict or None, optional
-        Class weighting used by the propensity model. ``None`` (default since
-        0.1.0) gives calibrated treatment probabilities; ``'balanced'``
-        reproduces the pre-0.1.0 nuisance fit.
+        Class weighting used by the propensity model. ``None`` (default)
+        gives calibrated treatment probabilities; ``'balanced'`` centres
+        scores near 0.5.
     
     Y_hat : array, optional
         Estimated potential outcome of shape (n, p, a, 2). The default is None.

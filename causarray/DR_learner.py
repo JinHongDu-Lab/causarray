@@ -440,11 +440,9 @@ def LFC(
         all rows: it roughly doubles the standard error for equal arms and
         inflates it far more for rare treatments, so do not use it for
         perturbation screens. For small, roughly balanced case-control designs
-        (for example donor-level pseudo-bulk) it gives more conservative
-        results than ``'pooled'``: on 85 SEA-AD donors with GCATE factors,
-        where ``'pooled'`` was anti-conservative under permuted labels (null
-        SD 1.1-1.8), ``'unequal'`` gave 0-1 false discoveries per permutation
-        (null SD 0.6-0.9).
+        (for example donor-level pseudo-bulk), where ``'pooled'`` can be
+        anti-conservative, it is the more conservative choice; check either
+        on permuted labels before relying on it.
 
         Neither estimator models within-donor or within-subject correlation.
         Repeated cells from the same biological unit should still be
@@ -572,10 +570,8 @@ def LFC(
     (``K=1``) the pooled variance is multiplied by ``n / (n - d)``, where ``d``
     is the number of outcome-model parameters (``W.shape[1] + 1``), and
     p-values use a t reference with ``n - d`` degrees of freedom. Both are
-    no-ops for large ``n``; on 85-donor pseudo-bulk data and 100-cell
-    perturbation arms they bring the null t-statistics from SD ≈ 1.08-1.10 to
-    ≈ 1.0 (label-permutation and fake-perturbation nulls on the SEA-AD and
-    Perturb-seq tutorials).
+    no-ops for large ``n`` and bring the spread of null t-statistics closer
+    to one for designs with tens of units or arms of about a hundred cells.
     """
     if eps_var is not None:
         warnings.warn(

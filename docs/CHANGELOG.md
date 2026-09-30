@@ -18,7 +18,10 @@
   perturbations cut from the controls) this cuts false discoveries from 114
   to 14, and the null SD for genes above 5 counts per cell from 1.32 to
   1.08. `min_mean=0` restores the old factors; `method='libsize'` uses total
-  counts.
+  counts. A cell with no counts in those genes gets its total count, rescaled
+  to the other cells' factors, instead of a factor near the median.
+- `comp_size_factor(method='scale')` returns one factor per row (total count
+  over `lib_size`); it returned one value per column.
 - `fit_gcate` now uses an `offset` array. The fit reads its offset from
   `size_factor`, which was set only for `offset=True`, so a supplied array was
   replaced by ones everywhere except the dispersion estimate.
@@ -30,7 +33,10 @@
   treatment: for a treatment whose weights concentrate (treated ESS < 0.5,
   overlap < 0.3 or AUC > 0.9) it drops the covariates most imbalanced between
   that treatment and the controls until its support recovers, and returns a
-  `drop_by_treatment` mapping for `refit_propensity_scores`.
+  `drop_by_treatment` mapping for `refit_propensity_scores`. A treatment that
+  already meets the target keeps every covariate; when the target cannot be
+  reached, `on_infeasible` keeps the closest fit (`'best'`, default), drops
+  every candidate (`'all'`) or none (`'none'`).
 - `import causarray` warns when it runs in an Intel (x86_64) Python translated
   by Rosetta 2 on an Apple Silicon Mac, where its numerical code runs several
   times slower (`LFC` on a 5,000-cell subsample: 159 s against 32-57 s

@@ -233,7 +233,7 @@ target holds::
 By default a treatment is adjusted when its treated ESS fraction falls below
 0.5, its overlap below 0.3 or its AUC above 0.9, and removal stops once ESS
 exceeds 0.5 and overlap 0.3. The intercept always stays. Library size is
-better decided before this step; see below.
+better decided before this step; see above.
 
 Choosing the penalty factor
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

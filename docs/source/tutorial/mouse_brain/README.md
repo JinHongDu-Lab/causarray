@@ -12,12 +12,8 @@ inputs and `results/` everything generated; both are local.
                                     python pipeline.py lfc  --tag L45Glut --batches 3
                                     python pipeline.py null --tag L45Glut --seeds 3,4,5
 
-Local only (not tracked):
-
-    1_prep_data.py                builds data/L45Glut.h5ad from the two pilot source files
-                                  (they share control cells; see its docstring)
-    L45Glut-investigation.ipynb   archived: how the pre-0.1.0 failures were diagnosed
-    legacy/                       archived scripts behind the investigation notebook
+The input `data/L45Glut.h5ad` is a subset of collaborator-provided pilot data
+and is not distributed with the repository.
 
 Results for one cell type live in `results/<tag>/`:
 

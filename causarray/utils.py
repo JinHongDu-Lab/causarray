@@ -162,20 +162,6 @@ class Early_Stopping():
 
 
 
-def _geo_mean(x):
-    non_zero_x = x[x != 0]
-    if len(non_zero_x) == 0:
-        return -np.inf
-    else:
-        return np.mean(np.log(non_zero_x))
-        
-def _normalize(counts, log_geo_means):
-    log_cnts = np.log(counts)
-    diff = log_cnts - log_geo_means
-    mask = np.isfinite(log_geo_means) & (counts > 0)
-    return np.median(diff[mask])
-
-
 def comp_size_factor(counts, method='geomeans', lib_size=1e4, min_mean=2.0,
                      min_genes=100, **kwargs):
     '''
@@ -189,14 +175,18 @@ def comp_size_factor(counts, method='geomeans', lib_size=1e4, min_mean=2.0,
         ``'geomeans'`` (default): median of each row's log-ratios to the
         per-gene geometric means, over the row's nonzero counts in genes
         with mean count at least ``min_mean``. ``'libsize'``: each row's
-        total count. ``'scale'``: ``lib_size`` divided by the column sums.
+        total count. ``'scale'``: each row's total count divided by
+        ``lib_size``, so that ``counts / size_factor`` has ``lib_size`` counts
+        per row.
     lib_size : float
-        The desired library size after normalization for 'scale'.
+        The library size after normalization for ``'scale'``.
     min_mean : float
         For ``'geomeans'``, genes with a mean count below this are left out
         of the ratios; if fewer than ``min_genes`` genes pass, the
         ``min_genes`` genes with the highest mean are used. ``0`` uses every
-        gene.
+        gene. A row with no counts in these genes gets its total count,
+        rescaled by the median ratio of size factor to total count over the
+        other rows.
     min_genes : int
         Minimum number of genes used by ``'geomeans'``.
 
@@ -220,7 +210,8 @@ def comp_size_factor(counts, method='geomeans', lib_size=1e4, min_mean=2.0,
 
     .. versionchanged:: 0.1.1
         ``'geomeans'`` uses genes with mean count at least ``min_mean``
-        (previously every gene); ``'libsize'`` added.
+        (previously every gene); ``'libsize'`` added; ``'scale'`` returns
+        one value per row (previously one per column).
     '''
     counts = np.asarray(counts, dtype=np.float64)
     if method == 'libsize':
@@ -247,43 +238,24 @@ def comp_size_factor(counts, method='geomeans', lib_size=1e4, min_mean=2.0,
                 return np.nanmedian(log_sub - log_geo_means[None, :], axis=1)
 
         log_size_factor = _log_median_ratio(counts[:, keep])
-        # A row with no counts in the selected genes falls back to all genes.
+        # A row with no counts in the selected genes falls back to its total
+        # count, put on the scale of the other rows by their median offset
+        # between log size factor and log total.
+        log_totals = np.log(np.where(counts.sum(axis=1) > 0, counts.sum(axis=1), np.nan))
         missing = ~np.isfinite(log_size_factor)
-        if missing.any():
-            log_size_factor[missing] = _log_median_ratio(counts[:, gene_mean > 0])[missing]
+        found = ~missing
+        if missing.any() and found.any():
+            shift = np.median(log_size_factor[found] - log_totals[found])
+            log_size_factor[missing] = log_totals[missing] + shift
         finite = np.isfinite(log_size_factor)
         size_factor = np.zeros(counts.shape[0])
         size_factor[finite] = np.exp(log_size_factor[finite] - np.mean(log_size_factor[finite]))
     elif method == 'scale':
-        size_factor = 1./np.sum(counts, axis=0)*lib_size
+        size_factor = counts.sum(axis=1) / lib_size
     else:
         raise ValueError("Method must be in {'geomeans', 'libsize', 'scale'}.")
 
     return size_factor
-    if method=='geomeans':
-        # Vectorized geometric mean (per gene, ignoring zeros)
-        counts = np.asarray(counts, dtype=np.float64)
-        log_counts = np.where(counts > 0, np.log(counts), np.nan)
-        log_geo_means = np.nanmean(log_counts, axis=0)
-        # Genes with all-zero columns get -inf
-        all_zero = np.all(counts == 0, axis=0)
-        log_geo_means[all_zero] = -np.inf
-
-        # Vectorized normalize (median of log-ratio per cell)
-        log_cnts = np.where(counts > 0, np.log(counts), np.nan)
-        diff = log_cnts - log_geo_means[None, :]
-        # Mask: finite geo_mean AND positive count
-        mask = np.isfinite(log_geo_means)[None, :] & (counts > 0)
-        diff_masked = np.where(mask, diff, np.nan)
-        log_size_factor = np.nanmedian(diff_masked, axis=1)
-        size_factor = np.exp(log_size_factor - np.mean(log_size_factor))
-    elif method=='scale':
-        size_factor = 1./np.sum(counts, axis=0)*lib_size
-    else:
-        raise ValueError("Method must be in {'libsize', 'geomeans', 'scale'}.")
-
-    return size_factor
-
 
 
 def subsample_ctrl_cells(ctrl_idx, n_ctrl=2000, random_state=0):

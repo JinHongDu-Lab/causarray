@@ -2,9 +2,8 @@
 
 On Apple Silicon, a Python built for Intel (x86_64) runs under Rosetta 2. It
 works, but NumPy, Numba and the GLM fits run translated and are several times
-slower: on a 5,000-cell subsample of a Perturb-seq screen, ``LFC`` took 159 s
-under Rosetta against 32-57 s natively. pip installs causarray into whichever
-Python it is given, so the check has to happen at run time.
+slower. pip installs causarray into whichever Python it is given, so the check
+has to happen at run time.
 """
 import platform
 import sys
@@ -19,7 +18,7 @@ def running_under_rosetta():
         return False
     try:
         import ctypes
-        libc = ctypes.CDLL('/usr/lib/libSystem.dylib')
+        libc = ctypes.CDLL(None)   # the running process, which links libSystem
         value = ctypes.c_int(0)
         size = ctypes.c_size_t(ctypes.sizeof(value))
         if libc.sysctlbyname(b'sysctl.proc_translated', ctypes.byref(value),

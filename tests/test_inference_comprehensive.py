@@ -448,7 +448,7 @@ class TestLFCIntegration:
 
     # ---- I13: 'unequal' is the Welch variance, more conservative than 'pooled' ----
     def test_unequal_is_welch_and_more_conservative(self, null_nb_balanced):
-        """I13 — same estimates, Welch standard errors about sqrt(2) larger for equal arms."""
+        """I13 — same estimates, Welch standard errors about 2x larger for equal arms."""
         Y, W, A, _, _ = null_nb_balanced
         df_pooled, _ = LFC(Y, W, A[:, None], family='nb', offset=True,
                            usevar='pooled', backend='fast')
@@ -457,7 +457,7 @@ class TestLFCIntegration:
         np.testing.assert_allclose(df_welch['tau'], df_pooled['tau'])
         ok = np.isfinite(df_pooled['std']) & ~df_pooled['var_floored'] & ~df_welch['var_floored']
         ratio = (df_welch.loc[ok, 'std'] / df_pooled.loc[ok, 'std']).median()
-        assert 1.2 < ratio < 2.2, ratio
+        assert 1.5 < ratio < 2.5, ratio
         assert (df_welch['padj'] < 0.1).sum() <= (df_pooled['padj'] < 0.1).sum()
         with pytest.raises(ValueError, match="usevar must be 'pooled' or 'unequal'"):
             LFC(Y, W, A[:, None], family='nb', offset=True, usevar='welch', backend='fast')

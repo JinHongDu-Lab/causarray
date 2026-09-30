@@ -370,6 +370,26 @@ def test_default_size_factors_track_depth_and_resist_composition():
     assert comp_size_factor(Y2)[3] == 0.0
 
 
+def test_size_factor_of_a_cell_without_well_expressed_counts():
+    """A cell with counts only in sparse genes gets a size factor in line
+    with its total count, not one near the median cell."""
+    from causarray import comp_size_factor
+    rng = np.random.default_rng(12)
+    n = 400
+    depth = np.exp(rng.normal(0, 0.35, n))
+    mu = np.r_[np.full(150, 5.0), np.full(850, 0.2)]
+    Y = rng.poisson(depth[:, None] * mu[None, :]).astype(float)
+    Y[0] = 0.0
+    Y[0, 150:155] = 1.0                       # 5 counts, all in sparse genes
+    sf = comp_size_factor(Y)
+    rel_total = Y[0].sum() / np.median(Y.sum(axis=1))
+    assert sf[0] == pytest.approx(rel_total * np.median(sf), rel=0.25)
+    assert sf[0] < 0.05
+    scale = comp_size_factor(Y, method='scale', lib_size=1e3)
+    assert scale.shape == (n,)
+    np.testing.assert_allclose(Y.sum(axis=1) / scale, 1e3)
+
+
 def test_highly_expressed_genes_do_not_shift_with_arm_depth():
     """Random arms differ in average depth by chance. With median-of-ratios
     size factors over every gene, most of that depth stays in highly expressed

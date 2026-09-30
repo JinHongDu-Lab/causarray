@@ -464,7 +464,7 @@ def tune_penalty_factor(
 
 def select_propensity_factors(
     A, X_A, candidates=None, treatment_names=None, covariate_names=None,
-    trigger=None, target=None,
+    trigger=None, target=None, on_infeasible='best',
     K=1, ps_model='logistic', mask=None, random_state=0, verbose=False,
     class_weight=None, **kwargs,
 ):
@@ -474,11 +474,11 @@ def select_propensity_factors(
     effect. When they do, the propensity model partly separates that arm from
     the controls and the inverse-probability weights pile onto the treated
     cells that look least affected. This starts from every covariate and, for
-    each treatment whose support fails ``trigger``, removes the candidate most
-    imbalanced between that treatment and the controls (largest absolute
-    standardized mean difference), refits that treatment alone, and repeats
-    until ``target`` holds or no candidate is left. Other treatments keep
-    every covariate.
+    each treatment whose support fails ``trigger`` but not already ``target``,
+    removes the candidate most imbalanced between that treatment and the
+    controls (largest absolute standardized mean difference), refits that
+    treatment alone, and repeats until ``target`` holds or no candidate is
+    left. Other treatments keep every covariate.
 
     It is the discrete counterpart of :func:`tune_penalty_factor`: a penalty
     shrinks one named coefficient, while this chooses which covariates stay.
@@ -503,19 +503,30 @@ def select_propensity_factors(
         'overlap_ratio_lt': 0.3, 'auc_gt': 0.9}``.
     target : mapping or None
         Conditions that stop the removal, combined with **and**. Defaults to
-        ``{'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}``.
+        ``{'ess_treated_fraction_gt': 0.5, 'overlap_ratio_gt': 0.3}``. A
+        triggered treatment that already meets ``target`` keeps every
+        covariate.
+    on_infeasible : {'best', 'all', 'none'}
+        What to do when ``target`` is not met even after every candidate is
+        dropped. ``'best'`` (default) keeps the fit, among those tried
+        (including the one with every covariate), that meets the most
+        ``target`` conditions, breaking ties by the larger treated ESS
+        fraction. ``'all'`` drops every candidate. ``'none'`` keeps every
+        covariate.
     K, ps_model, mask, random_state, verbose, class_weight, **kwargs
-        Passed to :func:`estimate_propensity_scores` for every fit.
+        Passed to :func:`estimate_propensity_scores` for every fit. With
+        ``mask``, the imbalance ranking and the support metrics both use only
+        the eligible cells of each treatment.
 
     Returns
     -------
     drop_by_treatment : dict
-        ``{treatment: [covariate, ...]}`` for the adjusted treatments, ready
-        to hand to :func:`refit_propensity_scores`.
+        ``{treatment: [covariate, ...]}`` for the treatments that lose at
+        least one covariate, ready to hand to :func:`refit_propensity_scores`.
     report : DataFrame
-        One row per adjusted treatment with the covariates dropped in order,
+        One row per triggered treatment with the covariates dropped in order,
         whether ``target`` was met, the number of fits, and the support
-        metrics with every covariate (``_all``) and after the removal
+        metrics with every covariate (``_all``) and with the chosen covariates
         (``_chosen``).
 
     Examples
@@ -564,6 +575,8 @@ def select_propensity_factors(
         mask_arr = np.asarray(mask, dtype=bool)
         if mask_arr.ndim == 1:
             mask_arr = mask_arr[:, None]
+    if on_infeasible not in ('best', 'all', 'none'):
+        raise ValueError("on_infeasible must be 'best', 'all' or 'none'")
     fit_kwargs = dict(K=K, ps_model=ps_model, mask=mask, clip=None,
                       random_state=random_state, verbose=False,
                       class_weight=class_weight, **kwargs)
@@ -572,39 +585,58 @@ def select_propensity_factors(
 
     def imbalance_order(j):
         case = A_arr[:, j] == 1
+        c_rows, t_rows = ctrl, case
+        if mask_arr is not None:
+            c_rows, t_rows = ctrl & mask_arr[:, j], case & mask_arr[:, j]
         smd = []
         for k in cand_idx:
-            c_vals, t_vals = X_arr[ctrl, k], X_arr[case, k]
+            c_vals, t_vals = X_arr[c_rows, k], X_arr[t_rows, k]
             sd = np.sqrt((np.var(c_vals, ddof=1) + np.var(t_vals, ddof=1)) / 2)
             smd.append(abs(np.mean(t_vals) - np.mean(c_vals)) / sd if sd > 0 else 0.0)
         return [candidates[i] for i in np.argsort(smd)[::-1]]
+
+    def closeness(metrics):
+        n_met = sum(_meets(metrics, {key: bound}) for key, bound in target.items())
+        ess = metrics['ess_treated_fraction']
+        return n_met, ess if np.isfinite(ess) else -np.inf
 
     rows, drops = [], {}
     for j, name in enumerate(treatment_names):
         before = _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
         if not any(_meets(before, {key: bound}) for key, bound in trigger.items()):
             continue
-        dropped, chosen, n_fits = [], before, 1
-        for covariate in imbalance_order(j):
-            dropped.append(covariate)
-            pi, _ = refit_propensity_scores(
-                A_arr, X_arr, pi_hat=pi, treatment_names=treatment_names,
-                covariate_names=covariate_names,
-                drop_by_treatment={name: list(dropped)}, **fit_kwargs)
-            n_fits += 1
-            chosen = _arm_support_metrics(A_arr, pi, j, mask=mask_arr)
-            if _meets(chosen, target):
-                break
-        drops[name] = list(dropped)
+        # Each fit tried: (covariates dropped, metrics, scores of arm j).
+        tried = [([], before, pi[:, j].copy())]
+        if not _meets(before, target):
+            for covariate in imbalance_order(j):
+                dropped = tried[-1][0] + [covariate]
+                pi_try, _ = refit_propensity_scores(
+                    A_arr, X_arr, pi_hat=pi.copy(), treatment_names=treatment_names,
+                    covariate_names=covariate_names,
+                    drop_by_treatment={name: dropped}, **fit_kwargs)
+                tried.append((dropped, _arm_support_metrics(A_arr, pi_try, j, mask=mask_arr),
+                              pi_try[:, j]))
+                if _meets(tried[-1][1], target):
+                    break
+        if _meets(tried[-1][1], target) or on_infeasible == 'all':
+            dropped, chosen, pi_j = tried[-1]
+        elif on_infeasible == 'none':
+            dropped, chosen, pi_j = tried[0]
+        else:
+            dropped, chosen, pi_j = max(tried, key=lambda t: closeness(t[1]))
+        pi[:, j] = pi_j
+        if dropped:
+            drops[name] = list(dropped)
         rows.append({'treatment': name, 'dropped': ','.join(dropped),
                      'n_dropped': len(dropped), 'target_met': _meets(chosen, target),
-                     'n_fits': n_fits,
+                     'n_fits': len(tried),
                      **{f'{k}_all': v for k, v in before.items()},
                      **{f'{k}_chosen': v for k, v in chosen.items()}})
 
     report = pd.DataFrame(rows)
     if verbose and len(report):
-        print(f'[select_propensity_factors] {len(report)} treatments adjusted, '
+        print(f'[select_propensity_factors] {len(report)} treatments triggered, '
+              f'{len(drops)} adjusted, '
               f'{int(report.target_met.sum())} met the target, '
               f'{report.n_fits.sum()} fits', flush=True)
     return drops, report

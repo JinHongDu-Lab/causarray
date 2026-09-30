@@ -31,6 +31,10 @@
   overlap < 0.3 or AUC > 0.9) it drops the covariates most imbalanced between
   that treatment and the controls until its support recovers, and returns a
   `drop_by_treatment` mapping for `refit_propensity_scores`.
+- `import causarray` warns when it runs in an Intel (x86_64) Python translated
+  by Rosetta 2 on an Apple Silicon Mac, where its numerical code runs several
+  times slower (`LFC` on a 5,000-cell subsample: 159 s against 32-57 s
+  natively). The README shows how to create a native environment.
 
 ### Changed
 

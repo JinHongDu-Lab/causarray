@@ -19,6 +19,13 @@ conda create -n causarray python=3.12 -y
 conda activate causarray
 ```
 
+On an Apple Silicon Mac, make sure the environment is native: `python -c "import
+platform; print(platform.machine())"` should print `arm64`. A conda started from
+a terminal running under Rosetta creates Intel (`x86_64`) environments, in which
+causarray runs several times slower; `causarray` warns about this at import.
+Create a native one with `CONDA_SUBDIR=osx-arm64 conda create -n causarray
+python=3.12 -y`, then `conda config --env --set subdir osx-arm64` inside it.
+
 The module can be installed via PyPI:
 ```cmd
 pip install causarray

@@ -6,6 +6,9 @@ if 'NUMBA_THREADING_LAYER' not in os.environ:
     os.environ['NUMBA_THREADING_LAYER_PRIORITY'] = 'omp workqueue tbb'
 os.environ.setdefault('KMP_WARNINGS', '0')
 
+from causarray._platform import warn_if_emulated
+warn_if_emulated()
+
 __all__ = [
     'LFC', 'gcate_lfc_batch', 'LFC_batch',
     'fit_glm', 'fit_glm_fast', 'fit_glm_ondisk',

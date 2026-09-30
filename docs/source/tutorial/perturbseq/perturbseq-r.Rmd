@@ -17,7 +17,7 @@ This tutorial uses an excitatory-neuron subset from [Jin et al. (2020), *Science
 The workflow is **prepare counts and treatment indicators → fit latent factors → check propensity support and refit where it fails → estimate log-fold changes**, the same as the Python tutorial. Support is checked before the effects are read, because an arm whose weights concentrate can report a discovery count that reflects the weights rather than the biology. Saved outputs illustrate one run; counts and rankings may change after refitting.
 
 ```{r}
-library(Seurat)
+suppressPackageStartupMessages(library(Seurat))
 
 sc.seurat <- readRDS("data/perturbseq-exneu.rds")
 

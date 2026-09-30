@@ -1,7 +1,6 @@
-Perturb-seq Tutorial (R)
-========================
+# Perturb-seq Tutorial (R)
 
-This tutorial uses an excitatory-neuron subset from [Jin et al. (2020),
+This tutorial uses an excitatory-neuron subset from [Jin et al. (2020),
 *Science*](https://doi.org/10.1126/science.aaz6063), which studied gene
 perturbations in the developing mouse brain. Data are available from the
 [Broad Single Cell
@@ -16,21 +15,8 @@ biology. Saved outputs illustrate one run; counts and rankings may
 change after refitting.
 
 ``` r
-library(Seurat)
-```
+suppressPackageStartupMessages(library(Seurat))
 
-    ## Loading required package: SeuratObject
-
-    ## Loading required package: sp
-
-    ## 
-    ## Attaching package: 'SeuratObject'
-
-    ## The following objects are masked from 'package:base':
-    ## 
-    ##     intersect, t
-
-``` r
 sc.seurat <- readRDS("data/perturbseq-exneu.rds")
 
 # Access the counts through Seurat when its installed version recognizes the
@@ -57,8 +43,7 @@ A <- data.frame(
 colnames(A) <- sub("^trt_", "", colnames(A))
 ```
 
-Prepare inputs
---------------
+## Prepare inputs
 
 Use `Y` for cell-by-gene counts, `A` for perturbation indicators, and
 `X`/`X_A` for outcome/propensity covariates. GFP control cells have
@@ -95,8 +80,7 @@ list2env(dat, .GlobalEnv)
 
     ## <environment: R_GlobalEnv>
 
-Estimate latent factors
------------------------
+## Estimate latent factors
 
 This example uses a fixed illustrative rank, matching the Python fitting
 cell. Inspect the JIC curve and nearby ranks in the Python example
@@ -133,8 +117,7 @@ cat(sprintf("Step 2 -- epochs: %d, best NLL: %.6f\n",
 
     ## Step 2 -- epochs: 29, best NLL: 1.709480
 
-Propensity-score diagnostics and factor selection
--------------------------------------------------
+## Propensity-score diagnostics and factor selection
 
 Read this before the effects. An arm whose propensity model separates it
 from the controls has inverse-probability weights concentrated on a few
@@ -145,24 +128,24 @@ Guides are assigned at random, so the propensity model only has to
 absorb chance imbalance between an arm and the controls. Two
 consequences for its covariates:
 
--   **Library size is left out, as a judgement call.** It could be a
-    confounder, since capture depth and cell quality affect both guide
-    detection and measured expression, or a consequence of the knockout,
-    which can change a cell’s total RNA; these data cannot tell which.
-    Most arms here have smaller libraries than the controls (median 64%
-    of the control level). With library size in the model, several arms
-    separate from the controls (AUC above 0.9, last column of the table
-    below), so their weights would rest on a few cells. Leaving it out
-    keeps every arm supported, at the cost of not adjusting for
-    depth-related confounding; the outcome model still normalizes for
-    depth through the size factors. The `LFC` documentation discusses
-    this choice.
--   **Latent factors are included, then checked arm by arm.** A factor
-    can also track a perturbation’s own effect; when one does,
-    `select_propensity_factors` drops it for that arm only. It flags an
-    arm whose treated ESS falls below 0.5, overlap below 0.3 or AUC
-    above 0.9, and removes the factor most imbalanced between that arm
-    and the controls, one at a time, until ESS and overlap recover.
+- **Library size is left out, as a judgement call.** It could be a
+  confounder, since capture depth and cell quality affect both guide
+  detection and measured expression, or a consequence of the knockout,
+  which can change a cell’s total RNA; these data cannot tell which.
+  Most arms here have smaller libraries than the controls (median 64% of
+  the control level). With library size in the model, several arms
+  separate from the controls (AUC above 0.9, last column of the table
+  below), so their weights would rest on a few cells. Leaving it out
+  keeps every arm supported, at the cost of not adjusting for
+  depth-related confounding; the outcome model still normalizes for
+  depth through the size factors. The `LFC` documentation discusses this
+  choice.
+- **Latent factors are included, then checked arm by arm.** A factor can
+  also track a perturbation’s own effect; when one does,
+  `select_propensity_factors` drops it for that arm only. It flags an
+  arm whose treated ESS falls below 0.5, overlap below 0.3 or AUC above
+  0.9, and removes the factor most imbalanced between that arm and the
+  controls, one at a time, until ESS and overlap recover.
 
 ``` r
 factor_names <- paste0("U", seq_len(ncol(U)))
@@ -362,8 +345,7 @@ knitr::asis_output("![](perturbseq-r_files/figure-markdown_github/treatment-asso
 
 ![](perturbseq-r_files/figure-markdown_github/treatment-associations-1.png)
 
-Estimation and results
-----------------------
+## Estimation and results
 
 ### Estimate log-fold changes
 

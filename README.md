@@ -45,7 +45,10 @@ conda env create -f environment-r.yaml
 ```
 
 The R tutorial runs from `causarray-r` and connects to the Python package in
-the `causarray` environment.
+the `causarray` environment. The two must share an architecture: on an Apple
+Silicon Mac, create both natively (`CONDA_SUBDIR=osx-arm64 conda env create -f
+environment-r.yaml`), since reticulate cannot load an arm64 Python into an
+Intel R.
 The documentation and tutorials using both `Python` and `R` are available at [causarray.readthedocs.io](https://causarray.readthedocs.io/en/latest/).
 
 

@@ -189,5 +189,15 @@ docs/source/tutorial/replogle/results/**
 # Unrelated tutorial directory (not part of causarray package docs)
 docs/source/tutorial/scp/
 
-# Local analysis, not part of the documentation.
-/docs/source/tutorial/mouse_brain/
+# Mouse-brain Perturb-seq: the tutorial notebook, the pipeline it imports and
+# the README are committed (the notebook is an orphan page, not in the index);
+# data, results, the archived investigation and its scripts stay local.
+/docs/source/tutorial/mouse_brain/*
+!/docs/source/tutorial/mouse_brain/L45Glut-py.ipynb
+!/docs/source/tutorial/mouse_brain/pipeline.py
+!/docs/source/tutorial/mouse_brain/README.md
+
+# SEA-AD: only the excitatory-neuron pseudo-bulk is committed; other prepared
+# data (e.g. subclass pseudo-bulks) stay local.
+docs/source/tutorial/case_control/data/*
+!docs/source/tutorial/case_control/data/sea_ad_mtg_exneu_pb.h5ad

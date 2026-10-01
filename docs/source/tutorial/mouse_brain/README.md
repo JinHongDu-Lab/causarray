@@ -20,6 +20,10 @@ Results for one cell type live in `results/<tag>/`:
 
     gcate.pkl, lfc.csv, lfc_batches/, wilcoxon.h5ad, null/     (pipeline outputs)
     lfc_batches/*_propensity.csv  arms the propensity check adjusted (L45Glut: Tpr)
+    nbglm.h5ad, deseq2.csv, ttest.h5ad   the other methods in section 6 (NB GLM without latent
+                                  factors, PyDESeq2, t-test), shared by both notebooks; DESeq2
+                                  takes about 25 minutes and needs `pip install pydeseq2` to
+                                  recompute (it is not in the causarray environment)
     min_counts5/                  the same run with the package default min_counts=5,
                                   used in the notebook's section 4
     min_counts40/                 the run with min_counts=40, read by L45Glut-mc40-py.ipynb:

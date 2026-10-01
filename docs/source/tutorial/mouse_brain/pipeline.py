@@ -10,6 +10,7 @@ same calls run unchanged for every other cell type.
     results/<tag>/lfc_batches/*_propensity.csv   arms the propensity check adjusted (if any)
     results/<tag>/lfc.csv             causarray, all perturbations
     results/<tag>/wilcoxon.h5ad       crispyx Wilcoxon, all perturbations
+    results/<tag>/nbglm.h5ad, ttest.h5ad, deseq2.csv   other methods for comparison
     results/<tag>/null/seed*.csv      causarray on fake perturbations of controls
     results/<tag>/null/wilcoxon_seed*.h5ad   Wilcoxon on the same fake labels
 
@@ -76,6 +77,9 @@ def paths(tag, variant=''):
         'batches': ca / 'lfc_batches',
         'lfc': ca / 'lfc.csv',
         'wilcoxon': out / 'wilcoxon.h5ad',
+        'nbglm': out / 'nbglm.h5ad',
+        'ttest': out / 'ttest.h5ad',
+        'deseq2': out / 'deseq2.csv',
         'null': ca / 'null',
         'null_wilcoxon': out / 'null',
     }
@@ -248,6 +252,126 @@ def run_wilcoxon(tag):
         crispyx.wilcoxon_test(p['norm'], perturbation_column=PERT_COL, control_label=CTRL_LABEL,
                               verbose=False, output_path=p['wilcoxon'])
     return wilcoxon_table(p['wilcoxon'])
+
+
+# ── Step 4b: other methods for comparison ───────────────────────────────────
+# Each runs once per cell type on the genes load_inputs keeps (seen in >= MIN_CELLS
+# cells) and, like Wilcoxon, is shared by causarray runs with any min_counts.
+def _kept_input(src, dst, counts_path):
+    """Write ``src`` restricted to the genes load_inputs keeps; crispyx reads from file."""
+    counts = ad.read_h5ad(counts_path)
+    keep = np.asarray((counts.X > 0).sum(0)).ravel() >= MIN_CELLS
+    ad.read_h5ad(src)[:, keep].copy().write_h5ad(dst)
+    return keep
+
+
+def _de_table(h5ad, name, lfc_layer='logfoldchanges', lfc_scale=1.0):
+    """Long table (trt, gene_names, <name>_logfc in log2, <name>_pvalue) from a crispyx result."""
+    res = ad.read_h5ad(h5ad)
+    cols = [pd.DataFrame(np.asarray(res.layers[lfc_layer]) * lfc_scale, index=res.obs_names,
+                         columns=res.var_names).stack().rename(f'{name}_logfc'),
+            pd.DataFrame(np.asarray(res.layers['pvalue']), index=res.obs_names,
+                         columns=res.var_names).stack().rename(f'{name}_pvalue')]
+    df = pd.concat(cols, axis=1).reset_index()
+    return df.rename(columns={df.columns[0]: 'trt', df.columns[1]: 'gene_names'})
+
+
+def run_nb_glm(tag, res_2):
+    """Negative-binomial GLM per perturbation (crispyx), with causarray's size factors and
+    no latent factors or weights: causarray's count model without its adjustment."""
+    p = paths(tag)
+    if not p['nbglm'].exists():
+        tmp = p['nbglm'].with_name('nbglm_input.h5ad')
+        _kept_input(p['counts'], tmp, p['counts'])
+        sf = np.asarray(res_2['kwargs_glm']['size_factor']).ravel()
+        crispyx.nb_glm_test(str(tmp), perturbation_column=PERT_COL, control_label=CTRL_LABEL,
+                            size_factors=sf, min_mu=1e-8, min_pct_ctrl=0, min_pct_pert=0,
+                            min_mean_ctrl=0, min_mean_pert=0, min_total_count=0,
+                            min_cells_ctrl=0, min_cells_pert=0, output_path=p['nbglm'],
+                            verbose=False, n_jobs=8)
+        tmp.unlink()
+    return _de_table(p['nbglm'], 'nbglm', 'logfoldchange_raw_ln', 1 / np.log(2))
+
+
+def run_ttest(tag):
+    """Welch t-test per perturbation on log-normalized counts (crispyx)."""
+    p = paths(tag)
+    if not p['ttest'].exists():
+        if not p['norm'].exists():
+            crispyx.normalize_total_log1p(p['counts'], output_path=p['norm'], verbose=False)
+        tmp = p['ttest'].with_name('ttest_input.h5ad')
+        _kept_input(p['norm'], tmp, p['counts'])
+        crispyx.t_test(str(tmp), perturbation_column=PERT_COL, control_label=CTRL_LABEL,
+                       min_pct_ctrl=0, min_pct_pert=0, min_mean_ctrl=0, min_mean_pert=0,
+                       output_path=p['ttest'], verbose=False, n_jobs=8)
+        tmp.unlink()
+    return _de_table(p['ttest'], 'ttest')
+
+
+def run_deseq2(tag):
+    """PyDESeq2: one model ~ perturbation on all cells, controls as reference, defaults except
+    poscounts size factors (the default ratio method needs genes without zeros). About 25
+    minutes on L4-5 IT Glut; needs ``pip install pydeseq2`` to recompute."""
+    p = paths(tag)
+    if not p['deseq2'].exists():
+        try:
+            from pydeseq2.dds import DeseqDataSet
+            from pydeseq2.ds import DeseqStats
+        except ImportError as e:
+            raise ImportError('run_deseq2 needs pydeseq2 (pip install pydeseq2) to compute '
+                              f"{p['deseq2'].name}") from e
+        a = ad.read_h5ad(p['counts'])
+        keep = np.asarray((a.X > 0).sum(0)).ravel() >= MIN_CELLS
+        a = a[:, keep]
+        X = a.X.toarray() if sp.issparse(a.X) else np.asarray(a.X)
+        counts = pd.DataFrame(np.rint(X).astype(int), index=a.obs_names.astype(str),
+                              columns=a.var_names.astype(str))
+        # factor levels without underscores; 'control' is the reference
+        meta = pd.DataFrame({'perturbation': a.obs[PERT_COL].astype(str).str.replace('_', '-')
+                             .replace({CTRL_LABEL.replace('_', '-'): 'control'}).to_numpy()},
+                            index=counts.index)
+        dds = DeseqDataSet(counts=counts, metadata=meta, design='~perturbation',
+                           ref_level=['perturbation', 'control'], size_factors_fit_type='poscounts',
+                           n_cpus=16, quiet=True)
+        dds.deseq2()
+        rows = []
+        for trt in sorted(set(meta['perturbation']) - {'control'}):
+            st = DeseqStats(dds, contrast=['perturbation', trt, 'control'], n_cpus=16, quiet=True)
+            st.summary()
+            r = st.results_df[['baseMean', 'log2FoldChange', 'pvalue', 'padj']].copy()
+            r['trt'] = trt; r.index.name = 'gene_names'
+            rows.append(r.reset_index())
+        pd.concat(rows, ignore_index=True).to_csv(p['deseq2'], index=False)
+    d = pd.read_csv(p['deseq2'])
+    return d.rename(columns={'log2FoldChange': 'deseq2_logfc', 'pvalue': 'deseq2_pvalue'})[
+        ['trt', 'gene_names', 'deseq2_logfc', 'deseq2_pvalue']]
+
+
+# Method name -> (log fold change column, adjusted p-value column) in the methods_on table.
+METHODS = {
+    'causarray': ('tau', 'padj'),
+    'NB GLM, no latent factors': ('nbglm_logfc', 'nbglm_padj'),
+    'DESeq2': ('deseq2_logfc', 'deseq2_padj'),
+    'Wilcoxon': ('wilcox_logfc', 'wilcox_padj'),
+    't-test, log-normalized': ('ttest_logfc', 'ttest_padj'),
+}
+
+
+def methods_on(df, tag, res_2):
+    """causarray's tested pairs with every method's log fold change and p-value attached.
+
+    As in ``wilcoxon_on``, each method's p-values are BH-adjusted within each
+    perturbation over the pairs causarray tests, so all methods share one family.
+    """
+    from statsmodels.stats.multitest import multipletests
+
+    m = wilcoxon_on(df, run_wilcoxon(tag))
+    for name, table in (('nbglm', run_nb_glm(tag, res_2)), ('deseq2', run_deseq2(tag)),
+                        ('ttest', run_ttest(tag))):
+        m = m.merge(table, on=['trt', 'gene_names'], how='left')
+        m[f'{name}_padj'] = m.groupby('trt')[f'{name}_pvalue'].transform(
+            lambda p: pd.Series(multipletests(p.fillna(1.0), method='fdr_bh')[1], index=p.index))
+    return m
 
 
 # ── Step 5: null calibration on controls ─────────────────────────────────────

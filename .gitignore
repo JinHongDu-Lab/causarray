@@ -194,6 +194,7 @@ docs/source/tutorial/scp/
 # data, results, the archived investigation and its scripts stay local.
 /docs/source/tutorial/mouse_brain/*
 !/docs/source/tutorial/mouse_brain/L45Glut-py.ipynb
+!/docs/source/tutorial/mouse_brain/L45Glut-mc40-py.ipynb
 !/docs/source/tutorial/mouse_brain/pipeline.py
 !/docs/source/tutorial/mouse_brain/README.md
 
